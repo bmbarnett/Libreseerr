@@ -184,13 +184,20 @@ async function fetchAvailability() {
     return cachedAvailability;
 }
 
+function normTitle(t) {
+    t = (t || "").toLowerCase().replace(/[\(\[].*?[\)\]]/g, " ")
+        .replace(/\s*[:\-]\s*an?\s+(novel|memoir|thriller|mystery|romance|story|tale|biography)\s*$/, "")
+        .replace(/[^a-z0-9]+/g, " ").trim();
+    return t.replace(/^(the|a|an) /, "");
+}
+
 function applyAvailabilityBadges(availability) {
     document.querySelectorAll(".book-card").forEach((card) => {
         if (card.querySelector(".book-badges")) return;
         let book;
         try { book = JSON.parse(card.dataset.book); } catch { return; }
         const isbn = book.isbn_13 || book.isbn_10 || book.isbn13 || book.isbn10 || "";
-        const title = (book.title || "").toLowerCase();
+        const title = normTitle(book.title);
 
         const hasEbook = (isbn && availability.ebook.isbns.includes(isbn)) ||
             (title && availability.ebook.titles.includes(title));
@@ -208,6 +215,10 @@ function applyAvailabilityBadges(availability) {
         const showAudiobook = audiobookRequested ? "requested" : (hasAudiobook ? "available" : null);
 
         if (!showEbook && !showAudiobook) return;
+
+        // Hide books that are already in the library or requested on either server
+        card.style.display = "none";
+        return;
 
         let html = '<div class="book-badges">';
         if (showEbook === "available") html += '<span class="book-badge ebook">eBook ✓</span>';

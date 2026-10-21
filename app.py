@@ -1,3 +1,4 @@
+import re
 import json
 import logging
 import os
@@ -686,13 +687,13 @@ def get_config():
     return jsonify({
         "ebook": {
             "url": config["ebook"].get("url", ""),
-            "api_key": config["ebook"].get("api_key", ""),
+            "api_key": config["ebook"].get("api_key", "") if current_user.role == "admin" else "",
             "server_software": config["ebook"].get("server_software", "readarr"),
             "configured": bool(config["ebook"].get("url") and config["ebook"].get("api_key")),
         },
         "audiobook": {
             "url": config["audiobook"].get("url", ""),
-            "api_key": config["audiobook"].get("api_key", ""),
+            "api_key": config["audiobook"].get("api_key", "") if current_user.role == "admin" else "",
             "server_software": config["audiobook"].get("server_software", "readarr"),
             "configured": bool(config["audiobook"].get("url") and config["audiobook"].get("api_key")),
         },
@@ -864,6 +865,19 @@ def search_books():
         return jsonify({"error": str(e)}), 500
 
 
+
+_GENERIC_SUBTITLE = re.compile(r"\s*[:\-]\s*an?\s+(?:novel|memoir|thriller|mystery|romance|story|tale|biography)\s*$", re.I)
+
+
+def norm_title(t):
+    """Normalise a title so "Project Hail Mary: A Novel" matches "Project Hail Mary"."""
+    t = (t or "").lower()
+    t = re.sub(r"[\(\[].*?[\)\]]", " ", t)
+    t = _GENERIC_SUBTITLE.sub("", t)
+    t = re.sub(r"[^a-z0-9]+", " ", t).strip()
+    return re.sub(r"^(the|a|an) ", "", t)
+
+
 @app.route("/api/availability")
 @login_required
 def check_availability():
@@ -905,12 +919,15 @@ def check_availability():
                     title = book.get("bookname", book.get("title", ""))
                 if title:
                     titles.add(title.lower())
+                    titles.add(norm_title(title))
             result[server_type] = {
                 "isbns": list(isbns),
                 "titles": list(titles),
             }
         except Exception as e:
             app.logger.warning("Failed to get books from %s: %s", server_type, e)
+
+    result["configured"] = {t: bool(get_client(t)) for t in ("ebook", "audiobook")}
 
     # Also include books with active requests (pending/processing/downloading)
     active_statuses = {"pending", "processing", "downloading"}
@@ -928,6 +945,7 @@ def check_availability():
             title = req.get("title", "")
             if title:
                 requests_by_type[server]["titles"].add(title.lower())
+                requests_by_type[server]["titles"].add(norm_title(title))
 
     result["ebook_requests"] = {
         "isbns": list(requests_by_type["ebook"]["isbns"]),
@@ -1005,52 +1023,77 @@ def create_request():
         "created_at": datetime.utcnow().isoformat(),
     }
 
-    try:
-        # First, try to find the book in Readarr via ISBN lookup
-        readarr_books = []
-        if isbn:
-            readarr_books = client.lookup_by_isbn(isbn)
-        if not readarr_books:
-            readarr_books = client.search_books(f"{title} {author_name}")
-
-        if readarr_books:
-            # Use the full Readarr lookup result — it has the correct
-            # editions, images, links, etc. that Readarr expects.
-            # We only override the author if Readarr returned empty data.
-            readarr_book = readarr_books[0]
-            if not readarr_book.get("author", {}).get("authorName"):
-                readarr_book["author"] = {
-                    "authorName": author_name,
-                    "foreignAuthorId": "",
-                }
-            app.logger.info(
-                "Readarr match for '%s': title='%s', author=%s",
-                title, readarr_book.get("title"), json.dumps(readarr_book.get("author", {})),
-            )
-            request_entry["status"] = "processing"
-        else:
-            # Fallback: build data from Open Library
-            readarr_book = {
-                "title": title,
-                "author": {
-                    "authorName": author_name,
-                    "foreignAuthorId": "",
-                },
-                "foreignBookId": isbn or book_data.get("id", ""),
-            }
-            app.logger.info("No Readarr match, using Open Library fallback for '%s' by '%s'", title, author_name)
-            request_entry["status"] = "processing"
-
-        result = client.add_book(readarr_book, quality_profile_id, root_folder)
-        request_entry["readarr_book_id"] = result.get("id")
-    except Exception as e:
-        request_entry["status"] = "error"
-        request_entry["error"] = str(e)
-
+    # Patched: queue the request and do the slow Bookshelf lookup/add in the background,
+    # so the page returns immediately instead of waiting on rreading-glasses.
     with lock:
         requests_history.insert(0, request_entry)
         save_requests()
 
+    def _process(entry_id=request_entry["id"]):
+        updates = {}
+        try:
+            # First, try to find the book in Readarr via ISBN lookup
+            readarr_books = []
+            if isbn:
+                readarr_books = client.lookup_by_isbn(isbn)
+            if not readarr_books:
+                readarr_books = client.search_books(f"{title} {author_name}")
+
+            if readarr_books:
+                # Patched: prefer the result whose title matches the requested one, not just the first hit
+                _want = norm_title(title)
+                _bad = re.compile(r"dramati[sz]ed|adaptation|graphic|collection|box(ed)? set|(?<![a-z])books? [0-9]|(?<![a-z])series(?![a-z])|companion|omnibus|complete| / ", re.I)
+
+                def _rank(b):
+                    t = b.get("title", "")
+                    n = norm_title(t)
+                    votes = (b.get("ratings") or {}).get("votes") or 0
+                    return (bool(_bad.search(t)), n != _want, not n.startswith(_want), -votes)
+
+                readarr_books = sorted(readarr_books, key=_rank)
+                # Use the full Readarr lookup result — it has the correct
+                # editions, images, links, etc. that Readarr expects.
+                # We only override the author if Readarr returned empty data.
+                readarr_book = readarr_books[0]
+                if not readarr_book.get("author", {}).get("authorName"):
+                    readarr_book["author"] = {
+                        "authorName": author_name,
+                        "foreignAuthorId": "",
+                    }
+                app.logger.info(
+                    "Readarr match for '%s': title='%s', author=%s",
+                    title, readarr_book.get("title"), json.dumps(readarr_book.get("author", {})),
+                )
+                updates["status"] = "processing"
+            else:
+                # Fallback: build data from Open Library
+                readarr_book = {
+                    "title": title,
+                    "author": {
+                        "authorName": author_name,
+                        "foreignAuthorId": "",
+                    },
+                    "foreignBookId": isbn or book_data.get("id", ""),
+                }
+                app.logger.info("No Readarr match, using Open Library fallback for '%s' by '%s'", title, author_name)
+                updates["status"] = "processing"
+
+            result = client.add_book(readarr_book, quality_profile_id, root_folder)
+            updates["readarr_book_id"] = result.get("id")
+        except Exception as e:
+            updates["status"] = "error"
+            updates["error"] = str(e)
+        if updates.get("status") == "error":
+            app.logger.warning("Background request %s failed: %s", entry_id, updates.get("error"))
+        with lock:
+            load_requests()
+            for r in requests_history:
+                if r["id"] == entry_id:
+                    r.update(updates)
+                    break
+            save_requests()
+
+    threading.Thread(target=_process, daemon=True).start()
     return jsonify(request_entry)
 
 

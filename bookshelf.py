@@ -28,7 +28,7 @@ class BookshelfClient:
     def search_books(self, query: str) -> list:
         """Search for books using the Bookshelf lookup endpoint."""
         resp = self.session.get(
-            self._url("/book/lookup"), params={"term": query}, timeout=15
+            self._url("/book/lookup"), params={"term": query}, timeout=150
         )
         resp.raise_for_status()
         return resp.json()
@@ -36,7 +36,7 @@ class BookshelfClient:
     def lookup_by_isbn(self, isbn: str) -> list:
         """Look up a book in Bookshelf by ISBN."""
         resp = self.session.get(
-            self._url("/book/lookup"), params={"term": f"isbn:{isbn}"}, timeout=15
+            self._url("/book/lookup"), params={"term": f"isbn:{isbn}"}, timeout=150
         )
         resp.raise_for_status()
         return resp.json()
@@ -44,7 +44,7 @@ class BookshelfClient:
     def lookup_author(self, name: str) -> list:
         """Look up an author in Bookshelf by name."""
         resp = self.session.get(
-            self._url("/author/lookup"), params={"term": name}, timeout=15
+            self._url("/author/lookup"), params={"term": name}, timeout=150
         )
         resp.raise_for_status()
         return resp.json()
@@ -90,7 +90,7 @@ class BookshelfClient:
         )
 
         # Check existing authors in Bookshelf
-        existing = self.session.get(self._url("/author"), timeout=15).json()
+        existing = self.session.get(self._url("/author"), timeout=150).json()
 
         # Match by foreignAuthorId first (most reliable)
         if foreign_author_id:
@@ -119,7 +119,7 @@ class BookshelfClient:
             lookup = self.session.get(
                 self._url("/author/lookup"),
                 params={"term": author_name},
-                timeout=15,
+                timeout=150,
             )
             if lookup.ok and lookup.json():
                 all_results = lookup.json()
@@ -146,7 +146,12 @@ class BookshelfClient:
                     f"Could not find author '{author_name}' in Bookshelf metadata"
                 )
 
-        metadata_profile_id = self._get_metadata_profile_id()
+        # Patched: add new authors with the "None" metadata profile so only the requested book is
+        # imported (NONE_PROFILE). The nightly author-backfill job on books01 later switches them to
+        # "Standard" (English) one at a time.
+        profiles = self.get_metadata_profiles()
+        none_p = next((p for p in profiles if p.get("name", "").lower() == "none"), None)
+        metadata_profile_id = none_p["id"] if none_p else self._get_metadata_profile_id()
         author_payload = {
             "authorName": author_data.get("authorName", author_name),
             "foreignAuthorId": foreign_author_id,
@@ -165,14 +170,14 @@ class BookshelfClient:
                 author_payload[key] = author_data[key]
 
         resp = self.session.post(
-            self._url("/author"), json=author_payload, timeout=30
+            self._url("/author"), json=author_payload, timeout=240
         )
 
         if resp.ok:
             return resp.json()
 
         # Still failing — check if author was added by another process
-        updated = self.session.get(self._url("/author"), timeout=15).json()
+        updated = self.session.get(self._url("/author"), timeout=150).json()
         match = next(
             (a for a in updated if a.get("foreignAuthorId") == foreign_author_id),
             None,
@@ -197,13 +202,27 @@ class BookshelfClient:
         )
         logger.info("Author for book '%s': %s (id=%s)", book_data.get("title"), added_author.get("authorName"), added_author.get("id"))
 
+        # Patched: authors added with monitor "none" end up unmonitored in Bookshelf, so the requested
+        # book is skipped by RSS/missing searches and by the ReadarrImport sync to the other instance.
+        # Monitor the author and all their books (the user wants every book monitored).
+        if added_author.get("id") and not added_author.get("monitored"):
+            try:
+                full = self.session.get(self._url(f"/author/{added_author['id']}"), timeout=150).json()
+                full["monitored"] = True
+                full["monitorNewItems"] = "none"
+                r = self.session.put(self._url(f"/author/{added_author['id']}"), json=full, timeout=150)
+                r.raise_for_status()
+                added_author = r.json()
+            except Exception as e:
+                logger.warning("Could not set author %s monitored: %s", added_author.get("id"), e)
+
         foreign_book_id = book_data.get("foreignBookId", "")
         foreign_edition_id = book_data.get("foreignEditionId", "")
         title = book_data.get("title", "Unknown")
 
         # Check if the book already exists in Bookshelf
         if foreign_book_id:
-            existing_books = self.session.get(self._url("/book"), timeout=15).json()
+            existing_books = self.session.get(self._url("/book"), timeout=150).json()
             match = next(
                 (b for b in existing_books if b.get("foreignBookId") == foreign_book_id),
                 None,
@@ -244,13 +263,13 @@ class BookshelfClient:
         logger.info("Adding book: %s", json.dumps(book_payload))
 
         resp = self.session.post(
-            self._url("/book"), json=book_payload, timeout=30
+            self._url("/book"), json=book_payload, timeout=240
         )
 
         if not resp.ok:
             # The book may already exist (orphaned from a prior partial add).
             # Re-check and return the existing book.
-            existing_books = self.session.get(self._url("/book"), timeout=15).json()
+            existing_books = self.session.get(self._url("/book"), timeout=150).json()
             match = next(
                 (b for b in existing_books if b.get("foreignBookId") == foreign_book_id),
                 None,
@@ -270,7 +289,7 @@ class BookshelfClient:
             search_resp = self.session.post(
                 self._url("/command"),
                 json={"name": "BookSearch", "bookIds": [book_id]},
-                timeout=15,
+                timeout=150,
             )
             if search_resp.ok:
                 logger.info("Triggered BookSearch for book id=%d", book_id)
@@ -299,7 +318,7 @@ class BookshelfClient:
 
     def get_books(self) -> list:
         """Get all books from the Bookshelf library."""
-        resp = self.session.get(self._url("/book"), timeout=30)
+        resp = self.session.get(self._url("/book"), timeout=240)
         resp.raise_for_status()
         return resp.json()
 
@@ -311,3 +330,24 @@ class BookshelfClient:
         resp.raise_for_status()
         data = resp.json()
         return data.get("records", data) if isinstance(data, dict) else data
+
+
+# Patched: when the author is new, Bookshelf creates all of that author's books unmonitored, and
+# POST /book then returns the existing unmonitored book, so the requested book was never monitored
+# or searched. Make sure the requested book ends up monitored and searched.
+_orig_add_book = BookshelfClient.add_book
+
+
+def _add_book_monitored(self, book_data, quality_profile_id, root_folder):
+    result = _orig_add_book(self, book_data, quality_profile_id, root_folder)
+    book_id = result.get("id")
+    if book_id and not result.get("monitored"):
+        r = self.session.put(self._url("/book/monitor"), json={"bookIds": [book_id], "monitored": True}, timeout=150)
+        r.raise_for_status()
+        result["monitored"] = True
+        logger.info("Set requested book id=%d monitored", book_id)
+        self.session.post(self._url("/command"), json={"name": "BookSearch", "bookIds": [book_id]}, timeout=150)
+    return result
+
+
+BookshelfClient.add_book = _add_book_monitored

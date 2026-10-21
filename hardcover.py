@@ -159,22 +159,72 @@ def find_book(title, author):
     }
 
 
+_LANG_QUERY = (
+    "query($ids:[Int!]){ books(where:{id:{_in:$ids}}){ id "
+    "default_physical_edition{language{language}} default_ebook_edition{language{language}} "
+    "default_cover_edition{language{language}} default_audio_edition{language{language}} } }"
+)
+_EDITION_KEYS = ("default_physical_edition", "default_ebook_edition", "default_cover_edition", "default_audio_edition")
+_lang_cache = {}  # book id -> True (English) / False (other language) / None (unknown)
+_FOREIGN_WORDS = {"y", "el", "la", "los", "las", "del", "und", "der", "die", "das", "les", "des", "une", "et",
+                  "il", "lo", "gli", "um", "uma", "na", "ve", "och", "en", "het", "een", "van"}
+_ENGLISH_WORDS = {"the", "and", "of", "to", "with", "for", "is", "from"}
+
+
+def _looks_foreign(title):
+    """Fallback when Hardcover has no language for a book: non-English letters or foreign function words."""
+    if any(c.isalpha() and ord(c) > 127 for c in title):
+        return True
+    words = re.findall(r"[a-zà-ÿ']+", title.lower())
+    return bool(words) and any(w in _FOREIGN_WORDS for w in words) and not any(w in _ENGLISH_WORDS for w in words)
+
+
+def english_only(docs):
+    """Drop books Hardcover says are not English (or, if it doesn't know, that look foreign by title)."""
+    ids = [int(d["id"]) for d in docs if d.get("id") and int(d["id"]) not in _lang_cache]
+    if ids:
+        try:
+            data = _gql(_LANG_QUERY, {"ids": ids})
+            for b in data.get("books", []):
+                langs = [((b.get(k) or {}).get("language") or {}).get("language") or "" for k in _EDITION_KEYS]
+                langs = [l for l in langs if l]
+                _lang_cache[int(b["id"])] = (True if any(l.startswith("English") for l in langs)
+                                             else False if langs else None)
+            for i in ids:
+                _lang_cache.setdefault(i, None)
+        except Exception as exc:
+            logger.warning("Hardcover language lookup failed: %s", exc)
+            return docs
+    kept = []
+    for d in docs:
+        flag = _lang_cache.get(int(d["id"])) if d.get("id") else None
+        title = d.get("title", "")
+        words = re.findall(r"[a-zà-ÿ']+", title.lower())
+        # Editions are sometimes mislabelled English, so two foreign function words and no English ones also counts
+        strongly_foreign = (sum(w in _FOREIGN_WORDS for w in words) >= 2
+                            and not any(w in _ENGLISH_WORDS for w in words))
+        if flag is False or strongly_foreign or (flag is None and _looks_foreign(title)):
+            continue
+        kept.append(d)
+    return kept
+
+
 def search_books(query, per_page=20):
-    """Search Hardcover for the UI search box. Returns a list of UI book dicts (compilations last)."""
+    """Search Hardcover for the UI search box. Returns a list of UI book dicts, English only."""
     if not enabled() or not query:
         return []
     try:
-        docs = _search(query, per_page=per_page, filter_by="compilation:=false", use_cache=False)
+        docs = _search(query, per_page=per_page + 15, filter_by="compilation:=false", use_cache=False)
     except Exception as exc:
         logger.warning("Hardcover search failed for '%s': %s", query, exc)
         return []
-    return [to_book(d) for d in docs]
+    return [to_book(d) for d in english_only(docs)][:per_page]
 
 
 def list_books(filter_by, sort="users_count:desc", per_page=20):
-    """Return UI book dicts for a filtered/sorted Hardcover list (Discover rows)."""
-    docs = _search("*", per_page=per_page, filter_by=filter_by, sort=sort, use_cache=False)
-    return [to_book(d) for d in docs]
+    """Return UI book dicts for a filtered/sorted Hardcover list (Discover rows), English only."""
+    docs = _search("*", per_page=per_page + 10, filter_by=filter_by, sort=sort, use_cache=False)
+    return [to_book(d) for d in english_only(docs)][:per_page]
 
 
 def trending(days=30, limit=20):
@@ -189,7 +239,7 @@ def trending(days=30, limit=20):
                    use_cache=False)
     order = {str(i): n for n, i in enumerate(ids)}
     docs.sort(key=lambda d: order.get(str(d.get("id")), 999))
-    return [to_book(d) for d in docs][:limit]
+    return [to_book(d) for d in english_only(docs)][:limit]
 
 
 def get_book(book_id):

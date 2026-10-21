@@ -232,3 +232,18 @@ body { background: #111827; }
 
 /* Recent requests row */
 .recent-row .book-card .book-info .book-author { color: #a5b4fc; }
+
+/* Toast confirmation (request sent) */
+#toast-box { position: fixed; right: 1.25rem; bottom: 1.25rem; display: flex; flex-direction: column; gap: 0.5rem; z-index: 400; }
+.toast {
+    background: #312e81;
+    color: #e0e7ff;
+    border: 1px solid #6366f1;
+    border-radius: 0.6rem;
+    padding: 0.65rem 1rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+    transition: opacity 0.4s, transform 0.4s;
+}
+.toast.hide { opacity: 0; transform: translateY(8px); }

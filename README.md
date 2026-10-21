@@ -212,4 +212,4 @@ or mismatched failed imports). They are homelab scripts: paths and the `bookshel
   matching is by Hardcover id first, then ISBN/title. Unmonitored catalogue entries without files don't count.
 - **Requests** are synced from Bookshelf every minute by a single background worker, the page auto-refreshes, stuck
   "pending" requests turn into Failed after 10 minutes with a Retry button, and finished requests are pruned
-  (`REQUEST_RETENTION_COMPLETED_DAYS`, default 7; `REQUEST_RETENTION_ERROR_DAYS`, default 3).
+  (`REQUEST_RETENTION_COMPLETED_DAYS`, default 1; `REQUEST_RETENTION_ERROR_DAYS`, default 2).

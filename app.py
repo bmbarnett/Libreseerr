@@ -1042,8 +1042,8 @@ def get_root_folders(server_type):
 # ─── Download / Request API ───
 
 STALE_PENDING_SECONDS = 600
-RETENTION_COMPLETED_DAYS = float(os.environ.get("REQUEST_RETENTION_COMPLETED_DAYS", "7"))
-RETENTION_ERROR_DAYS = float(os.environ.get("REQUEST_RETENTION_ERROR_DAYS", "3"))
+RETENTION_COMPLETED_DAYS = float(os.environ.get("REQUEST_RETENTION_COMPLETED_DAYS", "1"))
+RETENTION_ERROR_DAYS = float(os.environ.get("REQUEST_RETENTION_ERROR_DAYS", "2"))
 SYNC_INTERVAL_SECONDS = 60
 LEADER_LOCK_FILE = os.path.join(os.path.dirname(__file__), "data", "leader.lock")
 

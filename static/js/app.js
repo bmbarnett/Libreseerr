@@ -505,10 +505,12 @@ document.getElementById("confirm-download-btn").addEventListener("click", async 
         if (data.error) {
             alert("Error: " + data.error);
         } else {
+            const requestedTitle = currentModalBook ? currentModalBook.title : "Book";
             closeModal();
             cachedAvailability = null; // so the new request shows as requested
-            // Switch to requests page
-            document.querySelector('[data-page="requests"]').click();
+            // Stay on the current page; update the cards (hidden or badged) and confirm with a toast
+            fetchAvailability(true).then(applyAvailabilityBadges);
+            showToast(`Requested "${requestedTitle}"`);
         }
     } catch (err) {
         alert("Error: " + err.message);
@@ -517,6 +519,21 @@ document.getElementById("confirm-download-btn").addEventListener("click", async 
         btn.textContent = "Download";
     }
 });
+
+function showToast(message) {
+    let box = document.getElementById("toast-box");
+    if (!box) {
+        box = document.createElement("div");
+        box.id = "toast-box";
+        document.body.appendChild(box);
+    }
+    const toast = document.createElement("div");
+    toast.className = "toast";
+    toast.textContent = message;
+    box.appendChild(toast);
+    setTimeout(() => toast.classList.add("hide"), 3500);
+    setTimeout(() => toast.remove(), 4000);
+}
 
 // ─── Requests ───
 

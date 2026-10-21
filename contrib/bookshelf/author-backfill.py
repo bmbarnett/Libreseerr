@@ -4,9 +4,12 @@
 Switches them one at a time to the "Standard" (English) profile, refreshes, then monitors only the
 best edition of each non-junk book (see tidy) and searches for them. Stops for the night on any
 error / throttling.
-Usage: author-backfill.py [--dry-run] [--max N] [--tidy-only]
+Usage: author-backfill.py [--dry-run] [--max N] [--tidy-only | --prune-only]
 """
-import json, re, subprocess, sys, time, urllib.request, fcntl
+import json, os, re, subprocess, sys, time, urllib.request, fcntl
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bookshelf_lang
 
 BASE = "http://localhost:8787/api/v1"
 MAX_PER_RUN = 4
@@ -75,7 +78,7 @@ def tidy(aid):
         if k not in best or score > best[k][0]:
             best[k] = (score, b["id"])
     keep = {v[1] for v in best.values()}
-    want_on = [b["id"] for b in books if b["id"] in keep and not b.get("monitored")]
+    want_on = [] if "--prune-only" in sys.argv else [b["id"] for b in books if b["id"] in keep and not b.get("monitored")]
     want_off = [b["id"] for b in books if b["id"] not in keep and b.get("monitored")
                 and b["statistics"]["bookFileCount"] == 0]
     if not dry:
@@ -86,14 +89,24 @@ def tidy(aid):
     return len(books), len(keep), len(want_on), len(want_off)
 
 
+def drop_foreign(aid):
+    """Unmonitor this author's wanted (monitored, no file) books that are not English."""
+    wanted = [b for b in api("GET", f"/book?authorId={aid}")
+              if b.get("monitored") and not b["statistics"]["bookFileCount"]]
+    foreign = list(bookshelf_lang.foreign_ids(wanted))
+    if foreign and not dry:
+        api("PUT", "/book/monitor", {"bookIds": foreign, "monitored": False})
+    return len(foreign)
+
+
 profiles = {p["name"].lower(): p["id"] for p in api("GET", "/metadataprofile")}
 none_id, std_id = profiles["none"], profiles["standard"]
 
-if "--tidy-only" in sys.argv:
+if "--tidy-only" in sys.argv or "--prune-only" in sys.argv:
     # LibreSeerr-added authors only (ids 15+); the original authors are left alone.
     for a in api("GET", "/author"):
         if a["id"] >= 15 and a["metadataProfileId"] == std_id:
-            log(a["authorName"], "(total, kept, +on, -off)", tidy(a["id"]))
+            log(a["authorName"], "(total, kept, +on, -off)", tidy(a["id"]), "foreign off:", drop_foreign(a["id"]))
     sys.exit(0)
 
 todo = [a for a in api("GET", "/author") if a["metadataProfileId"] == none_id]
@@ -125,8 +138,9 @@ for a in todo:
                 raise RuntimeError(f"refresh {c['status']}")
             time.sleep(15)
         total, kept, on, off = tidy(aid)
+        foreign = drop_foreign(aid)
         api("POST", "/command", {"name": "AuthorSearch", "authorId": aid})
-        log(f"  {name}: {total} books, {kept} kept monitored (+{on}/-{off}), search queued")
+        log(f"  {name}: {total} books, {kept} kept monitored (+{on}/-{off}), {foreign} foreign unmonitored, search queued")
     except Exception as e:
         log(f"  {name} failed ({e}); reverting to None profile and stopping")
         full = api("GET", f"/author/{aid}")

@@ -18,7 +18,7 @@ import hardcover
 logger = logging.getLogger(__name__)
 
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "data", "discover.json")
-REFRESH_SECONDS = 3 * 3600
+REFRESH_SECONDS = 12 * 3600
 NYT_LISTS = [
     ("nyt_fiction", "NYT Best Sellers: Fiction", "combined-print-and-e-book-fiction"),
     ("nyt_nonfiction", "NYT Best Sellers: Nonfiction", "combined-print-and-e-book-nonfiction"),
@@ -86,7 +86,12 @@ def _definitions():
         for key, title, name in NYT_LISTS:
             defs.append((key, title, lambda n=name: _build_nyt(n)))
     if hardcover.enabled():
-        defs.append(("trending", "Trending Now", lambda: hardcover.trending(days=30, limit=20)))
+        defs.append(("coming_out", "Coming Out This Week", lambda: hardcover.releasing(days_back=2, days_ahead=7)))
+        defs.append(("trending_week", "Trending This Week", lambda: hardcover.trending(days=7, limit=20)))
+        defs.append(("trending_month", "Best of the Month", lambda: hardcover.trending(days=30, limit=20)))
+        defs.append(("trending_year", "Best of the Year", lambda: hardcover.trending(days=365, limit=20)))
+        defs.append(("most_read", "All-Time Most Read", lambda: hardcover.list_books(
+            "compilation:=false", sort="users_count:desc", per_page=20)))
         defs.append(("new_releases", "New & Popular Releases", lambda: hardcover.list_books(
             f"release_year:>={year} && compilation:=false && users_count:>=300")))
         for key, title, genre in GENRES:
@@ -104,7 +109,7 @@ def refresh():
     for key, title, builder in defs:
         try:
             books = builder()
-            if key not in ("trending",) and not key.startswith("nyt_"):
+            if not key.startswith(("trending", "nyt_", "coming_out", "most_read")):
                 books = [b for b in books if b.get("hardcover_id") not in seen]
                 seen.update(b.get("hardcover_id") for b in books)
             if books:

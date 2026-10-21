@@ -13,7 +13,8 @@ SEARCH_QUERY = ('query($q:String!,$f:String){ search(query:$q, query_type:"Book"
 
 def _gql(query, variables):
     body = json.dumps({"query": query, "variables": variables}).encode()
-    for attempt in range(3):
+    for attempt in range(5):
+        bookshelf_lang.throttle()
         req = urllib.request.Request(bookshelf_lang.API_URL, data=body, headers={
             "Authorization": bookshelf_lang._auth(), "Content-Type": "application/json",
             "User-Agent": "homelab-bookshelf"})
@@ -21,9 +22,13 @@ def _gql(query, variables):
             with urllib.request.urlopen(req, timeout=60) as r:
                 return json.load(r)["data"]
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < 2:
-                time.sleep(10)
-                continue
+            if e.code == 429:
+                bookshelf_lang.note_rate_limit(e)
+                if time.time() < bookshelf_lang._blocked_until:
+                    raise bookshelf_lang.QuotaExhausted("Hardcover daily quota used up")
+                if attempt < 4:
+                    time.sleep(15 * (attempt + 1))      # per-minute limit: back off 15, 30, 45, 60 s
+                    continue
             raise
 
 

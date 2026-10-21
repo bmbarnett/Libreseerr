@@ -109,29 +109,72 @@ def filter_author(raw):
     return json.dumps(doc).encode()
 
 
+CACHE_DIR = os.environ.get("CACHE_DIR", "/data")
+SMALL_AUTHOR = 25               # authors with this few works are harmless to pass through unfiltered
+
+
+def cache_get(author_id):
+    """Return (time, body) from memory or the on-disk cache, or None."""
+    if author_id in cache:
+        return cache[author_id]
+    try:
+        path = os.path.join(CACHE_DIR, f"author-{author_id}.json")
+        with open(path, "rb") as f:
+            entry = (os.path.getmtime(path), f.read())
+        cache[author_id] = entry
+        return entry
+    except OSError:
+        return None
+
+
+def cache_put(author_id, body):
+    cache[author_id] = (time.time(), body)
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(os.path.join(CACHE_DIR, f"author-{author_id}.json"), "wb") as f:
+            f.write(body)
+    except OSError as exc:
+        log.warning("could not persist cache for author %s: %s", author_id, exc)
+
+
 def author_response(author_id, query):
-    now = time.time()
-    hit = cache.get(author_id)
-    if hit and now - hit[0] < CACHE_SECONDS:
-        return hit[1]
+    """Return (status, content type, body).
+
+    Failing closed matters: if filtering fails (e.g. Hardcover rate limit) a stale filtered answer is served,
+    otherwise a 503, so Bookshelf keeps what it has instead of re-importing the whole unfiltered catalogue.
+    """
+    hit = cache_get(author_id)
+    if hit and time.time() - hit[0] < CACHE_SECONDS:
+        return 200, "application/json", hit[1]
     with locks_guard:
         lock = locks.setdefault(author_id, threading.Lock())
     with lock:
-        hit = cache.get(author_id)
+        hit = cache_get(author_id)
         if hit and time.time() - hit[0] < CACHE_SECONDS:
-            return hit[1]
+            return 200, "application/json", hit[1]
         status, ctype, raw = upstream_get(f"/author/{author_id}{query}", timeout=180)
         if status != 200:
-            return None
+            return status, ctype, raw
+        reason = None
         try:
             body = filter_author(raw)
+            if body is not None:
+                cache_put(author_id, body)
+                return 200, "application/json", body
+            reason = "no catalogue data"
         except Exception as exc:
-            log.warning("author %s: filtering failed (%s), passing through", author_id, exc)
-            body = None
-        if body is None:
-            return raw          # not cached, so the next request tries again
-        cache[author_id] = (time.time(), body)
-        return body
+            reason = str(exc)
+        if hit:
+            log.warning("author %s: filtering failed (%s), serving the stale filtered answer", author_id, reason)
+            return 200, "application/json", hit[1]
+        try:
+            if len(json.loads(raw).get("Works") or []) <= SMALL_AUTHOR:
+                log.warning("author %s: filtering failed (%s), small author passed through", author_id, reason)
+                return 200, ctype, raw
+        except ValueError:
+            pass
+        log.warning("author %s: filtering failed (%s), refusing (503) so Bookshelf keeps its data", author_id, reason)
+        return 503, "text/plain", b"catalogue filter unavailable, retry later"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -152,9 +195,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             m = re.match(r"^/author/(\d+)(\?.*)?$", self.path)
             if m:
-                body = author_response(m.group(1), m.group(2) or "")
-                if body is not None:
-                    return self._send(200, "application/json", body, head)
+                status, ctype, body = author_response(m.group(1), m.group(2) or "")
+                return self._send(status, ctype, body, head)
             status, ctype, body = upstream_get(self.path)
             self._send(status, ctype, body, head)
         except Exception as exc:

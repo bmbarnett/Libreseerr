@@ -269,6 +269,27 @@ def trending(days=30, limit=20):
     return [to_book(d) for d in collapse_variations(english_only(docs))][:limit]
 
 
+def releasing(days_back=2, days_ahead=7, limit=20):
+    """Books with a release date from `days_back` ago to `days_ahead` from now, most-anticipated first.
+
+    Hardcover can sort the search by release_date but not filter a date range, so this fetches the newest
+    entries of the year (and next year around New Year) and keeps those inside the window.
+    """
+    today = date.today()
+    start, end = today - timedelta(days=days_back), today + timedelta(days=days_ahead)
+    years = sorted({start.year, end.year})
+    docs = []
+    for year in years:
+        try:
+            docs += _search("*", per_page=100, filter_by=f"release_year:={year} && compilation:=false",
+                            sort="release_date:desc", use_cache=False)
+        except Exception as exc:
+            logger.warning("Hardcover release-date search failed for %s: %s", year, exc)
+    window = [d for d in docs if start.isoformat() <= (d.get("release_date") or "") <= end.isoformat()]
+    window.sort(key=lambda d: -(d.get("users_count") or 0))
+    return [to_book(d) for d in collapse_variations(english_only(window))][:limit]
+
+
 def get_book(book_id):
     """Return a UI book dict extended with description, rating, genres and series, or None."""
     if not enabled() or not book_id:

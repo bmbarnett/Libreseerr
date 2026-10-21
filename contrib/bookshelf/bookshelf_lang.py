@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -39,18 +40,58 @@ def _auth():
     return _token
 
 
+_last_call = 0.0
+_throttle_lock = threading.Lock()
+
+
+_blocked_until = 0.0
+
+
+class QuotaExhausted(Exception):
+    """Hardcover's daily allowance (5,000 requests on the free plan) is used up; stop calling until it resets."""
+
+
+def note_rate_limit(err):
+    """After an HTTP 429: if the daily allowance is gone (or Hardcover says to wait a long time), block calls."""
+    global _blocked_until
+    try:
+        remaining = err.headers.get("x-ratelimit-daily-remaining")
+        retry = int(err.headers.get("retry-after") or 0)
+    except (AttributeError, ValueError):
+        return
+    if remaining == "0" or retry > 120:
+        _blocked_until = time.time() + min(max(retry, 300), 86400)
+
+
+def throttle(min_gap=2.0):
+    """Space out Hardcover calls: one token is shared by several services and Hardcover allows ~60/minute."""
+    global _last_call
+    if time.time() < _blocked_until:
+        raise QuotaExhausted(f"Hardcover daily quota used up, retry in {int(_blocked_until - time.time())}s")
+    with _throttle_lock:
+        wait = _last_call + min_gap - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        _last_call = time.time()
+
+
 def _query(ids):
     body = json.dumps({"query": QUERY, "variables": {"ids": ids}}).encode()
-    for attempt in range(3):
+    for attempt in range(5):
+        throttle()
         req = urllib.request.Request(API_URL, data=body, headers={
             "Authorization": _auth(), "Content-Type": "application/json", "User-Agent": "homelab-bookshelf"})
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
                 return json.load(r)["data"]["books"]
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < 2:
-                time.sleep(10)
-                continue
+            if e.code == 429:
+                note_rate_limit(e)
+                if time.time() < _blocked_until:
+                    raise QuotaExhausted("Hardcover daily quota used up")
+                if attempt < 4:
+                    time.sleep(15 * (attempt + 1))      # per-minute limit: back off 15, 30, 45, 60 s
+                    continue
             raise
 
 

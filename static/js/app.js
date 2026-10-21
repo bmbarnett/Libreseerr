@@ -318,23 +318,7 @@ async function loadDiscovery() {
         return;
     }
 
-    // "Recent Requests" row, like Seerr: the latest requests, always shown (never hidden)
-    let recentHtml = "";
-    try {
-        const recent = (await (await fetch("/api/requests")).json()).slice(0, 12).map((r) => ({
-            ...(r.book || {}),
-            title: r.title,
-            authors: [r.author],
-            cover: r.cover_url || (r.book && r.book.cover) || "",
-            hardcover_id: r.hardcover_id || (r.book && r.book.hardcover_id) || "",
-        }));
-        if (recent.length) {
-            recentHtml = renderDiscoveryRow({ title: "Recent Requests", books: recent }).replace(
-                '<div class="discovery-row">', '<div class="discovery-row recent-row">');
-        }
-    } catch { /* optional row */ }
-
-    container.innerHTML = recentHtml + valid.map(renderDiscoveryRow).join("");
+    container.innerHTML = valid.map(renderDiscoveryRow).join("");
 
     container.querySelectorAll(".book-card").forEach((card) => {
         card.addEventListener("click", () => {

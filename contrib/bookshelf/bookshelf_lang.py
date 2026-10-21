@@ -87,7 +87,8 @@ def foreign_ids(books):
             titles = [book.get("title", ""), hc.get("title", "")]
             if any(l.startswith("English") for l in langs):
                 # Mislabelled editions: only a strong foreign-title signal overrides an English label
-                if any(_title_foreign(t, True) for t in titles):
+                # Judge by Hardcover's own title: Bookshelf shows an arbitrary (often foreign) edition title
+                if _title_foreign(hc.get("title", ""), True):
                     result[book["id"]] = "foreign title"
             elif langs:
                 # Foreign-only editions, unless the title is plainly English (e.g. "A Trail of Fire")

@@ -74,13 +74,13 @@ def tidy(aid):
         if JUNK.search(b["title"]):
             continue
         k = norm(b["title"])
-        score = (b["statistics"]["bookFileCount"] > 0, (b.get("ratings") or {}).get("votes") or 0)
+        score = ((b.get("statistics") or {}).get("bookFileCount", 0) > 0, (b.get("ratings") or {}).get("votes") or 0)
         if k not in best or score > best[k][0]:
             best[k] = (score, b["id"])
     keep = {v[1] for v in best.values()}
     want_on = [] if "--prune-only" in sys.argv else [b["id"] for b in books if b["id"] in keep and not b.get("monitored")]
     want_off = [b["id"] for b in books if b["id"] not in keep and b.get("monitored")
-                and b["statistics"]["bookFileCount"] == 0]
+                and (b.get("statistics") or {}).get("bookFileCount", 0) == 0]
     if not dry:
         if want_on:
             api("PUT", "/book/monitor", {"bookIds": want_on, "monitored": True})
@@ -92,7 +92,7 @@ def tidy(aid):
 def drop_foreign(aid):
     """Unmonitor this author's wanted (monitored, no file) books that are not English."""
     wanted = [b for b in api("GET", f"/book?authorId={aid}")
-              if b.get("monitored") and not b["statistics"]["bookFileCount"]]
+              if b.get("monitored") and not (b.get("statistics") or {}).get("bookFileCount", 0)]
     foreign = list(bookshelf_lang.foreign_ids(wanted))
     if foreign and not dry:
         api("PUT", "/book/monitor", {"bookIds": foreign, "monitored": False})
@@ -137,10 +137,11 @@ for a in todo:
             if c["status"] in ("failed", "aborted", "cancelled") or time.time() - t0 > REFRESH_TIMEOUT:
                 raise RuntimeError(f"refresh {c['status']}")
             time.sleep(15)
-        total, kept, on, off = tidy(aid)
-        foreign = drop_foreign(aid)
-        api("POST", "/command", {"name": "AuthorSearch", "authorId": aid})
-        log(f"  {name}: {total} books, {kept} kept monitored (+{on}/-{off}), {foreign} foreign unmonitored, search queued")
+        # Build the author's canonical book list (Hardcover + Open Library): monitor those, add missing ones
+        here = os.path.dirname(os.path.abspath(__file__))
+        subprocess.run([sys.executable, os.path.join(here, "curated-books.py"), "--author", name, "--min-id", "1"],
+                       check=False)
+        log(f"  {name}: refreshed and curated (details in curated-books.log)")
     except Exception as e:
         log(f"  {name} failed ({e}); reverting to None profile and stopping")
         full = api("GET", f"/author/{aid}")

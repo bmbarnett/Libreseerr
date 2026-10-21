@@ -218,13 +218,36 @@ def search_books(query, per_page=20):
     except Exception as exc:
         logger.warning("Hardcover search failed for '%s': %s", query, exc)
         return []
-    return [to_book(d) for d in english_only(docs)][:per_page]
+    return [to_book(d) for d in collapse_variations(english_only(docs))][:per_page]
+
+
+def collapse_variations(docs):
+    """One result per title: Hardcover lists many entries for the same book (editions, reprints).
+
+    Entries with the same normalised title and an author surname in common are one book. The most-read
+    entry wins and keeps the position of the first one seen, so relevance order is preserved.
+    """
+    def surnames(d):
+        return {re.findall(r"[a-z]+", n.lower())[-1] for n in (d.get("author_names") or []) if re.findall(r"[a-z]+", n.lower())}
+
+    groups = []  # [normalised title, surnames, best doc]
+    for d in docs:
+        title, names = _norm(d.get("title", "")), surnames(d)
+        for g in groups:
+            if g[0] == title and (g[1] & names or not names or not g[1]):
+                g[1] |= names
+                if (d.get("users_count") or 0) > (g[2].get("users_count") or 0):
+                    g[2] = d
+                break
+        else:
+            groups.append([title, names, d])
+    return [g[2] for g in groups]
 
 
 def list_books(filter_by, sort="users_count:desc", per_page=20):
     """Return UI book dicts for a filtered/sorted Hardcover list (Discover rows), English only."""
     docs = _search("*", per_page=per_page + 10, filter_by=filter_by, sort=sort, use_cache=False)
-    return [to_book(d) for d in english_only(docs)][:per_page]
+    return [to_book(d) for d in collapse_variations(english_only(docs))][:per_page]
 
 
 def trending(days=30, limit=20):
@@ -239,7 +262,7 @@ def trending(days=30, limit=20):
                    use_cache=False)
     order = {str(i): n for n, i in enumerate(ids)}
     docs.sort(key=lambda d: order.get(str(d.get("id")), 999))
-    return [to_book(d) for d in english_only(docs)][:limit]
+    return [to_book(d) for d in collapse_variations(english_only(docs))][:limit]
 
 
 def get_book(book_id):

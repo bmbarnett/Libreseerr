@@ -247,3 +247,6 @@ body { background: #111827; }
     transition: opacity 0.4s, transform 0.4s;
 }
 .toast.hide { opacity: 0; transform: translateY(8px); }
+
+/* API keys and passwords on the admin pages: masked text boxes so the browser doesn't offer to save a password */
+.secret-input { -webkit-text-security: disc; text-security: disc; }

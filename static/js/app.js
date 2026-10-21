@@ -192,7 +192,8 @@ async function fetchAvailability(force = false) {
 function normTitle(t) {
     t = (t || "").toLowerCase().replace(/[\(\[].*?[\)\]]/g, " ")
         .replace(/\s*[:\-]\s*an?\s+(novel|memoir|thriller|mystery|romance|story|tale|biography)\s*$/, "")
-        .replace(/[^a-z0-9]+/g, " ").trim();
+        .replace(/[^a-z0-9]+/g, " ").trim()
+        .replace(/(sorcerer|philosopher) ?s stone/, "philosophers stone");
     return t.replace(/^(the|a|an) /, "");
 }
 
@@ -210,7 +211,10 @@ function bookStatus(book, availability, kind) {
     const inList = (list, v) => v && Array.isArray(list) && list.includes(v);
 
     if (inList(req.ids, hcId) || inList(req.isbns, isbn) || inList(req.titles, title)) return "requested";
-    if (inList(lib.ids, hcId) || inList(lib.isbns, isbn) || inList(lib.titles, title)) return "available";
+    // In Bookshelf and downloaded = available; monitored with no file yet = still being requested/downloaded
+    if (inList(lib.have_ids, hcId)) return "available";
+    if (inList(lib.ids, hcId)) return "requested";
+    if (inList(lib.isbns, isbn) || inList(lib.titles, title)) return "available";
     return null;
 }
 

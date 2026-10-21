@@ -62,6 +62,7 @@ def _norm(text):
     text = re.sub(r"[\(\[].*?[\)\]]", " ", (text or "").lower())
     text = re.sub(r"\s*[:\-]\s*an?\s+(novel|memoir|thriller|mystery|romance|story|tale|biography)\s*$", "", text)
     text = re.sub(r"[^a-z0-9]+", " ", text).strip()
+    text = re.sub(r"(sorcerer|philosopher) ?s stone", "philosophers stone", text)
     return re.sub(r"^(the|a|an) ", "", text)
 
 

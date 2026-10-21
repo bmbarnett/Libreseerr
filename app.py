@@ -891,6 +891,7 @@ def norm_title(t):
     t = re.sub(r"[\(\[].*?[\)\]]", " ", t)
     t = _GENERIC_SUBTITLE.sub("", t)
     t = re.sub(r"[^a-z0-9]+", " ", t).strip()
+    t = re.sub(r"(sorcerer|philosopher) ?s stone", "philosophers stone", t)  # US/UK title
     return re.sub(r"^(the|a|an) ", "", t)
 
 
@@ -908,7 +909,7 @@ def _library_snapshot():
             continue
         try:
             books = client.get_books()
-            isbns, titles, ids, authors = set(), set(), set(), set()
+            isbns, titles, ids, authors, have_ids = set(), set(), set(), set(), set()
             for book in books:
                 # Unmonitored catalogue entries with no file aren't "in the library"
                 if not book.get("monitored", True) and not (book.get("statistics") or {}).get("bookFileCount"):
@@ -917,6 +918,8 @@ def _library_snapshot():
                 # Bookshelf book ids are Hardcover book ids
                 if book.get("foreignBookId"):
                     ids.add(str(book["foreignBookId"]))
+                    if (book.get("statistics") or {}).get("bookFileCount"):
+                        have_ids.add(str(book["foreignBookId"]))  # downloaded, vs. monitored and still wanted
                 # Readarr/Bookshelf format: editions array with isbn fields
                 if isinstance(book.get("editions"), list):
                     for edition in book["editions"]:
@@ -949,6 +952,7 @@ def _library_snapshot():
                 "isbns": list(isbns),
                 "titles": list(titles),
                 "ids": list(ids),
+                "have_ids": list(have_ids),
                 "authors": list(authors),
             }
         except Exception as e:

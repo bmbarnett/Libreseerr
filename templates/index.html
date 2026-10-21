@@ -6,6 +6,7 @@
     <title>Libreseerr</title>
     <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
     <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/seerr.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
@@ -99,6 +100,7 @@
                         <button id="refresh-btn" class="btn btn-secondary">Refresh Status</button>
                     </div>
                 </div>
+                <div id="request-filters" class="request-filters"></div>
                 <div id="requests-list" class="requests-list"></div>
             </div>
 
@@ -280,6 +282,24 @@
                 </div>
             </div>
         </main>
+    </div>
+
+    <!-- Book Details Modal -->
+    <div id="details-modal" class="modal" onclick="if (event.target === this) closeDetails()">
+        <div class="modal-content details-content">
+            <button class="modal-close details-close" onclick="closeDetails()">&times;</button>
+            <div class="details-hero">
+                <img id="details-cover" class="details-cover" alt="">
+                <div class="details-main">
+                    <h2 id="details-title"></h2>
+                    <div id="details-sub" class="details-sub"></div>
+                    <div id="details-meta" class="details-meta"></div>
+                    <div id="details-genres" class="details-genres"></div>
+                    <p id="details-desc" class="details-desc"></p>
+                    <div id="details-actions" class="details-actions"></div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Download Modal -->

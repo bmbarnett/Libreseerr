@@ -858,6 +858,16 @@ def discover_books():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/book/<book_id>")
+@login_required
+def book_details(book_id):
+    """Details (description, rating, genres, series) for a Hardcover book id, for the details modal."""
+    book = hardcover.get_book(book_id)
+    if not book:
+        return jsonify({"error": "Details unavailable"}), 404
+    return jsonify(book)
+
+
 @app.route("/api/search")
 @login_required
 def search_books():

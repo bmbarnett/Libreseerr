@@ -190,3 +190,32 @@ def trending(days=30, limit=20):
     order = {str(i): n for n, i in enumerate(ids)}
     docs.sort(key=lambda d: order.get(str(d.get("id")), 999))
     return [to_book(d) for d in docs][:limit]
+
+
+def get_book(book_id):
+    """Return a UI book dict extended with description, rating, genres and series, or None."""
+    if not enabled() or not book_id:
+        return None
+    try:
+        docs = _search("*", per_page=1, filter_by=f"id:=[{int(book_id)}]")
+    except Exception as exc:
+        logger.warning("Hardcover details failed for %s: %s", book_id, exc)
+        return None
+    if not docs:
+        return None
+    d = docs[0]
+    book = to_book(d)
+    book.update({
+        "description": re.sub(r"<[^>]+>", " ", d.get("description") or "").strip(),
+        "subtitle": d.get("subtitle") or "",
+        "rating": round(d.get("rating") or 0, 2),
+        "ratings_count": d.get("ratings_count") or 0,
+        "genres": (d.get("genres") or [])[:6],
+        "series": (d.get("series_names") or [""])[0],
+        "series_position": d.get("featured_series_position"),
+        "release_date": d.get("release_date") or "",
+        "has_audiobook": bool(d.get("has_audiobook")),
+        "has_ebook": bool(d.get("has_ebook")),
+        "slug": d.get("slug") or "",
+    })
+    return book

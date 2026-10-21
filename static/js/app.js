@@ -1,3 +1,8 @@
+// Inline placeholder (no external image host needed)
+const NO_COVER = "data:image/svg+xml;utf8," + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="300"><rect width="200" height="300" fill="#1f2937"/>' +
+    '<text x="100" y="155" fill="#6b7280" font-family="sans-serif" font-size="16" text-anchor="middle">No cover</text></svg>');
+
 // State
 let currentModalBook = null;
 let selectedServer = "ebook";
@@ -138,7 +143,7 @@ async function doSearch() {
         }
         grid.innerHTML = data.map(renderBookCard).join("");
         grid.querySelectorAll(".book-card").forEach((card) => {
-            card.addEventListener("click", () => openDownloadModal(JSON.parse(card.dataset.book)));
+            card.addEventListener("click", () => openDetails(JSON.parse(card.dataset.book)));
         });
         fetchAvailability().then(applyAvailabilityBadges);
     } catch (err) {
@@ -154,16 +159,17 @@ function renderBookCard(book) {
     if (book.author?.images?.length) cover = book.author.images[0].url;
     if (!cover && book.images?.length) cover = book.images[0].url;
     if (!cover && book.cover) cover = book.cover;
-    if (!cover) cover = "https://via.placeholder.com/200x300/1f2937/ec4899?text=No+Cover";
+    if (!cover) cover = NO_COVER;
     const bookJson = JSON.stringify(book).replace(/"/g, "&quot;");
 
     return `
         <div class="book-card" data-book="${bookJson}">
             <img class="book-cover" src="${cover}" alt="${title}" loading="lazy"
-                 onerror="this.src='https://via.placeholder.com/200x300/1f2937/ec4899?text=No+Cover'">
+                 onerror="this.onerror=null;this.src=NO_COVER">
             <div class="book-overlay">
                 <div class="book-overlay-title">${title}</div>
                 <div class="book-overlay-author">${author}${year ? " (" + year + ")" : ""}</div>
+                <button class="book-request-btn" type="button">Request</button>
             </div>
             <div class="book-info">
                 <div class="book-title" title="${title}">${title}</div>
@@ -233,11 +239,20 @@ function applyAvailabilityBadges(availability) {
         const authorKnown = authorName && ((availability.ebook?.authors || []).includes(authorName) ||
             (availability.audiobook?.authors || []).includes(authorName));
 
-        if ((ebook || audio) && hide) {
+        const inRecentRow = !!card.closest(".recent-row");
+        if ((ebook || audio) && hide && !inRecentRow) {
             card.style.display = "none";
             return;
         }
         card.style.display = "";
+
+        const reqBtn = card.querySelector(".book-request-btn");
+        if (reqBtn) {
+            const both = ebook && audio;
+            reqBtn.classList.toggle("disabled", !!both);
+            reqBtn.textContent = both ? (ebook === "available" && audio === "available" ? "In library" : "Requested")
+                : (ebook || audio) ? "Request other format" : "Request";
+        }
         if (!ebook && !audio && !authorKnown) return;
 
         let html = '<div class="book-badges">';
@@ -303,21 +318,102 @@ async function loadDiscovery() {
         return;
     }
 
-    container.innerHTML = valid.map(renderDiscoveryRow).join("");
+    // "Recent Requests" row, like Seerr: the latest requests, always shown (never hidden)
+    let recentHtml = "";
+    try {
+        const recent = (await (await fetch("/api/requests")).json()).slice(0, 12).map((r) => ({
+            ...(r.book || {}),
+            title: r.title,
+            authors: [r.author],
+            cover: r.cover_url || (r.book && r.book.cover) || "",
+            hardcover_id: r.hardcover_id || (r.book && r.book.hardcover_id) || "",
+        }));
+        if (recent.length) {
+            recentHtml = renderDiscoveryRow({ title: "Recent Requests", books: recent }).replace(
+                '<div class="discovery-row">', '<div class="discovery-row recent-row">');
+        }
+    } catch { /* optional row */ }
+
+    container.innerHTML = recentHtml + valid.map(renderDiscoveryRow).join("");
 
     container.querySelectorAll(".book-card").forEach((card) => {
         card.addEventListener("click", () => {
-            openDownloadModal(JSON.parse(card.dataset.book));
+            openDetails(JSON.parse(card.dataset.book));
         });
     });
     fetchAvailability().then(applyAvailabilityBadges);
 }
 
+// The overlay Request button goes straight to the request dialog; the rest of the card opens details
+document.addEventListener("click", (e) => {
+    const btn = e.target.closest(".book-request-btn");
+    if (!btn) return;
+    e.stopPropagation();
+    if (btn.classList.contains("disabled")) return;
+    const card = btn.closest(".book-card");
+    try { openDownloadModal(JSON.parse(card.dataset.book)); } catch { /* ignore */ }
+}, true);
+
 // ─── Download Modal ───
 
-async function openDownloadModal(book) {
+// ─── Book details (Seerr-style popup) ───
+
+function closeDetails() {
+    document.getElementById("details-modal").classList.remove("active");
+}
+
+async function openDetails(book) {
+    const modal = document.getElementById("details-modal");
+    const author = Array.isArray(book.authors) ? book.authors.join(", ") : (book.author?.authorName || "");
+    document.getElementById("details-cover").src = book.cover || NO_COVER;
+    document.getElementById("details-title").textContent = book.title || "Unknown";
+    document.getElementById("details-sub").textContent = author + (book.publishedDate ? " · " + book.publishedDate : "");
+    document.getElementById("details-meta").innerHTML = "";
+    document.getElementById("details-genres").innerHTML = "";
+    document.getElementById("details-desc").textContent = book.description || "";
+    modal.classList.add("active");
+
+    const renderActions = (availability) => {
+        const box = document.getElementById("details-actions");
+        box.innerHTML = "";
+        [["ebook", "eBook"], ["audiobook", "Audiobook"]].forEach(([kind, label]) => {
+            if (availability.configured && availability.configured[kind] === false) return;
+            const state = availability ? bookStatus(book, availability, kind) : null;
+            const btn = document.createElement("button");
+            btn.className = "btn btn-primary";
+            if (state === "available") { btn.className = "btn btn-secondary is-done"; btn.textContent = label + " in library"; }
+            else if (state === "requested") { btn.className = "btn btn-secondary is-pending"; btn.textContent = label + " requested"; }
+            else {
+                btn.textContent = "Request " + label;
+                btn.addEventListener("click", () => { closeDetails(); openDownloadModal(book, kind); });
+            }
+            box.appendChild(btn);
+        });
+    };
+    renderActions(await fetchAvailability());
+
+    if (book.hardcover_id) {
+        try {
+            const resp = await fetch("/api/book/" + encodeURIComponent(book.hardcover_id));
+            if (resp.ok) {
+                const d = await resp.json();
+                if (!modal.classList.contains("active") || document.getElementById("details-title").textContent !== (book.title || "Unknown")) return;
+                document.getElementById("details-desc").textContent = d.description || "";
+                const meta = [];
+                if (d.series) meta.push(`<span><strong>${d.series}</strong>${d.series_position ? " #" + d.series_position : ""}</span>`);
+                if (d.rating) meta.push(`<span>★ <strong>${d.rating}</strong> (${(d.ratings_count || 0).toLocaleString()})</span>`);
+                if (d.users) meta.push(`<span><strong>${d.users.toLocaleString()}</strong> readers</span>`);
+                if (d.pageCount) meta.push(`<span>${d.pageCount} pages</span>`);
+                document.getElementById("details-meta").innerHTML = meta.join("");
+                document.getElementById("details-genres").innerHTML = (d.genres || []).map((g) => `<span>${g}</span>`).join("");
+            }
+        } catch { /* basic info is already shown */ }
+    }
+}
+
+async function openDownloadModal(book, server = "ebook") {
     currentModalBook = book;
-    selectedServer = "ebook";
+    selectedServer = server;
 
     document.getElementById("modal-title").textContent = "Download: " + (book.title || "Unknown");
     document.querySelectorAll(".server-btn").forEach((btn) => {
@@ -424,13 +520,36 @@ document.getElementById("confirm-download-btn").addEventListener("click", async 
 
 // ─── Requests ───
 
+let requestFilter = "all";
+const REQUEST_FILTERS = [
+    ["all", "All", () => true],
+    ["pending", "Pending", (r) => r.status === "pending"],
+    ["processing", "Processing", (r) => r.status === "processing" || r.status === "downloading"],
+    ["completed", "Available", (r) => r.status === "completed"],
+    ["error", "Failed", (r) => r.status === "error"],
+];
+
+function renderRequestFilters(data) {
+    const bar = document.getElementById("request-filters");
+    bar.innerHTML = REQUEST_FILTERS.map(([key, label, fn]) =>
+        `<button class="request-filter ${requestFilter === key ? "active" : ""}" data-filter="${key}">${label}<span class="count">${data.filter(fn).length}</span></button>`
+    ).join("");
+    bar.querySelectorAll(".request-filter").forEach((b) => b.addEventListener("click", () => {
+        requestFilter = b.dataset.filter;
+        loadRequests();
+    }));
+}
+
 async function loadRequests() {
     const list = document.getElementById("requests-list");
     try {
         const resp = await fetch("/api/requests");
-        const data = await resp.json();
+        const all = await resp.json();
+        renderRequestFilters(all);
+        const filterFn = REQUEST_FILTERS.find((f) => f[0] === requestFilter)[2];
+        const data = all.filter(filterFn);
         if (!data.length) {
-            list.innerHTML = '<div class="empty-state">No requests yet. Search for books and download them!</div>';
+            list.innerHTML = '<div class="empty-state">' + (all.length ? "Nothing in this view." : "No requests yet. Search for books and request them!") + '</div>';
             return;
         }
         list.innerHTML = data.map(renderRequest).join("");
@@ -459,7 +578,7 @@ async function loadRequests() {
 }
 
 function renderRequest(req) {
-    const cover = req.cover_url || "https://via.placeholder.com/50x75/1f2937/ec4899?text=N/A";
+    const cover = req.cover_url || NO_COVER;
     const progress = req.progress || 0;
     const fillClass = req.status === "completed" ? "complete" : req.status === "error" ? "error" : "";
 
@@ -488,7 +607,7 @@ function renderRequest(req) {
     return `
         <div class="request-item">
             <img class="request-cover" src="${cover}" alt="${req.title}"
-                 onerror="this.src='https://via.placeholder.com/50x75/1f2937/ec4899?text=N/A'">
+                 onerror="this.onerror=null;this.src=NO_COVER">
             <div class="request-details">
                 <div class="request-title">${req.title}</div>
                 <div class="request-meta">${req.author || ""}${req.requested_by ? " · requested by " + req.requested_by : ""}${req.created_at ? " · " + timeAgo(req.created_at) : ""}</div>
@@ -944,4 +1063,11 @@ window.testOIDC = async function () {
 loadCurrentUser().then(() => {
     loadConfig();
     loadDiscovery();
+});
+
+// Escape closes any open popup
+document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    closeDetails();
+    if (typeof closeModal === "function") closeModal();
 });

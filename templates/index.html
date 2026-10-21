@@ -79,6 +79,12 @@
         <main class="container">
             <!-- Search Page -->
             <div id="page-search" class="page active">
+                <div class="discover-toolbar">
+                    <label class="toggle-label">
+                        <input type="checkbox" id="hide-owned" checked>
+                        Hide books already in the library or requested
+                    </label>
+                </div>
                 <div id="discovery-content"></div>
                 <div id="search-results" class="results-grid"></div>
             </div>
@@ -87,7 +93,11 @@
             <div id="page-requests" class="page">
                 <div class="page-header">
                     <h2>Request History</h2>
-                    <button id="refresh-btn" class="btn btn-secondary">Refresh Status</button>
+                    <div class="page-header-actions">
+                        <button id="clear-completed-btn" class="btn btn-secondary btn-small">Clear available</button>
+                        <button id="clear-failed-btn" class="btn btn-secondary btn-small">Clear failed</button>
+                        <button id="refresh-btn" class="btn btn-secondary">Refresh Status</button>
+                    </div>
                 </div>
                 <div id="requests-list" class="requests-list"></div>
             </div>

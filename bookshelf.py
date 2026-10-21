@@ -324,6 +324,12 @@ class BookshelfClient:
         resp.raise_for_status()
         return resp.json()
 
+    def get_authors(self) -> list:
+        """Get all authors from the Bookshelf library."""
+        resp = self.session.get(self._url("/author"), timeout=150)
+        resp.raise_for_status()
+        return resp.json()
+
     def get_books(self) -> list:
         """Get all books from the Bookshelf library."""
         resp = self.session.get(self._url("/book"), timeout=240)

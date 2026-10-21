@@ -173,14 +173,19 @@ function renderBookCard(book) {
         </div>`;
 }
 
-async function fetchAvailability() {
-    if (cachedAvailability) return cachedAvailability;
+let availabilityFetchedAt = 0;
+
+async function fetchAvailability(force = false) {
+    // Refetch after 30 s so books requested or added meanwhile show up
+    if (cachedAvailability && !force && Date.now() - availabilityFetchedAt < 30000) return cachedAvailability;
     try {
         const resp = await fetch("/api/availability");
         cachedAvailability = await resp.json();
     } catch {
-        cachedAvailability = { ebook: { isbns: [], titles: [] }, audiobook: { isbns: [], titles: [] } };
+        cachedAvailability = cachedAvailability ||
+            { ebook: { isbns: [], titles: [] }, audiobook: { isbns: [], titles: [] } };
     }
+    availabilityFetchedAt = Date.now();
     return cachedAvailability;
 }
 
@@ -191,44 +196,62 @@ function normTitle(t) {
     return t.replace(/^(the|a|an) /, "");
 }
 
+function hideOwnedEnabled() {
+    try { return localStorage.getItem("hideOwned") !== "0"; } catch { return true; }
+}
+
+function bookStatus(book, availability, kind) {
+    // kind is "ebook" or "audiobook"; returns "available", "requested" or null
+    const isbn = book.isbn_13 || book.isbn_10 || book.isbn13 || book.isbn10 || "";
+    const hcId = book.hardcover_id ? String(book.hardcover_id) : "";
+    const title = normTitle(book.title);
+    const lib = availability[kind] || {};
+    const req = availability[kind + "_requests"] || {};
+    const inList = (list, v) => v && Array.isArray(list) && list.includes(v);
+
+    if (inList(req.ids, hcId) || inList(req.isbns, isbn) || inList(req.titles, title)) return "requested";
+    if (inList(lib.ids, hcId) || inList(lib.isbns, isbn) || inList(lib.titles, title)) return "available";
+    return null;
+}
+
 function applyAvailabilityBadges(availability) {
+    const hide = hideOwnedEnabled();
     document.querySelectorAll(".book-card").forEach((card) => {
-        if (card.querySelector(".book-badges")) return;
         let book;
         try { book = JSON.parse(card.dataset.book); } catch { return; }
-        const isbn = book.isbn_13 || book.isbn_10 || book.isbn13 || book.isbn10 || "";
-        const title = normTitle(book.title);
 
-        const hasEbook = (isbn && availability.ebook.isbns.includes(isbn)) ||
-            (title && availability.ebook.titles.includes(title));
-        const hasAudiobook = (isbn && availability.audiobook.isbns.includes(isbn)) ||
-            (title && availability.audiobook.titles.includes(title));
-        const ebookRequested = availability.ebook_requests &&
-            ((isbn && availability.ebook_requests.isbns.includes(isbn)) ||
-            (title && availability.ebook_requests.titles.includes(title)));
-        const audiobookRequested = availability.audiobook_requests &&
-            ((isbn && availability.audiobook_requests.isbns.includes(isbn)) ||
-            (title && availability.audiobook_requests.titles.includes(title)));
+        card.querySelector(".book-badges")?.remove();
+        const ebook = bookStatus(book, availability, "ebook");
+        const audio = bookStatus(book, availability, "audiobook");
 
-        // "Requested" takes priority over "available" for the same server type
-        const showEbook = ebookRequested ? "requested" : (hasEbook ? "available" : null);
-        const showAudiobook = audiobookRequested ? "requested" : (hasAudiobook ? "available" : null);
+        // Author already in the library (hint only, not hidden)
+        const authorName = normTitle(Array.isArray(book.authors) ? book.authors[0] : book.author?.authorName);
+        const authorKnown = authorName && ((availability.ebook?.authors || []).includes(authorName) ||
+            (availability.audiobook?.authors || []).includes(authorName));
 
-        if (!showEbook && !showAudiobook) return;
-
-        // Hide books that are already in the library or requested on either server
-        card.style.display = "none";
-        return;
+        if ((ebook || audio) && hide) {
+            card.style.display = "none";
+            return;
+        }
+        card.style.display = "";
+        if (!ebook && !audio && !authorKnown) return;
 
         let html = '<div class="book-badges">';
-        if (showEbook === "available") html += '<span class="book-badge ebook">eBook ✓</span>';
-        else if (showEbook === "requested") html += '<span class="book-badge ebook-requested">eBook Requested</span>';
-        if (showAudiobook === "available") html += '<span class="book-badge audiobook">Audiobook ✓</span>';
-        else if (showAudiobook === "requested") html += '<span class="book-badge audiobook-requested">Audiobook Requested</span>';
-        html += '</div>';
+        const badge = (label, state) =>
+            `<span class="book-badge ${state}">${label} ${state === "available" ? "available" : "requested"}</span>`;
+        if (ebook) html += badge("eBook", ebook);
+        if (audio) html += badge("Audiobook", audio);
+        if (!ebook && !audio && authorKnown) html += '<span class="book-badge author">Author in library</span>';
+        html += "</div>";
         card.querySelector(".book-info").insertAdjacentHTML("beforeend", html);
     });
 }
+
+document.getElementById("hide-owned").checked = hideOwnedEnabled();
+document.getElementById("hide-owned").addEventListener("change", (e) => {
+    try { localStorage.setItem("hideOwned", e.target.checked ? "1" : "0"); } catch { /* ignore */ }
+    fetchAvailability().then(applyAvailabilityBadges);
+});
 
 function renderDiscoveryRow(category) {
     const cards = category.books.map(renderBookCard).join("");
@@ -250,7 +273,14 @@ async function loadDiscovery() {
 
     container.innerHTML = '<div class="discovery-loading"><div class="spinner"></div> Loading discovery...</div>';
 
-    const promises = DISCOVERY_CATEGORIES.map(async (cat) => {
+    // Rows built on the server (Hardcover trending/genres, NYT lists); Open Library rows if none yet
+    let categories = DISCOVERY_CATEGORIES;
+    try {
+        const rows = await (await fetch("/api/discover/rows")).json();
+        if (Array.isArray(rows) && rows.length) categories = rows;
+    } catch { /* use the default list */ }
+
+    const promises = categories.map(async (cat) => {
         try {
             const resp = await fetch("/api/discover?category=" + encodeURIComponent(cat.key) + "&limit=20");
             const data = await resp.json();
@@ -376,6 +406,7 @@ document.getElementById("confirm-download-btn").addEventListener("click", async 
             alert("Error: " + data.error);
         } else {
             closeModal();
+            cachedAvailability = null; // so the new request shows as requested
             // Switch to requests page
             document.querySelector('[data-page="requests"]').click();
         }
@@ -404,6 +435,17 @@ async function loadRequests() {
                 e.stopPropagation();
                 const id = parseInt(btn.dataset.id);
                 await fetch("/api/requests/" + id, { method: "DELETE" });
+                cachedAvailability = null;
+                loadRequests();
+            });
+        });
+        list.querySelectorAll(".retry-btn").forEach((btn) => {
+            btn.addEventListener("click", async (e) => {
+                e.stopPropagation();
+                btn.disabled = true;
+                const resp = await fetch("/api/requests/" + btn.dataset.id + "/retry", { method: "POST" });
+                const result = await resp.json();
+                if (result.error) alert(result.error);
                 loadRequests();
             });
         });
@@ -418,16 +460,19 @@ function renderRequest(req) {
     const fillClass = req.status === "completed" ? "complete" : req.status === "error" ? "error" : "";
 
     let statusDisplay;
-    if (req.status === "processing" || req.status === "pending") {
+    if (req.status === "pending") {
+        statusDisplay = '<span class="status-label pending"><span class="spinner"></span> Pending</span>';
+    } else if (req.status === "processing") {
         statusDisplay = '<span class="status-label processing"><span class="spinner"></span> Processing</span>';
     } else if (req.status === "completed") {
-        statusDisplay = `<span class="status-label completed">Completed</span>
+        statusDisplay = `<span class="status-label completed">Available</span>
                 <div class="progress-bar">
                     <div class="progress-fill complete" style="width: 100%"></div>
                 </div>`;
     } else if (req.status === "error") {
-        statusDisplay = `<span class="status-label error">Error</span>
-                ${req.error ? `<div class="request-error" title="${req.error}">${req.error}</div>` : ""}`;
+        statusDisplay = `<span class="status-label error">Failed</span>
+                ${req.error ? `<div class="request-error" title="${req.error}">${req.error}</div>` : ""}
+                <button class="btn btn-small btn-secondary retry-btn" data-id="${req.id}" style="margin-top: 0.4rem">Retry</button>`;
     } else {
         // downloading
         statusDisplay = `<span class="status-label downloading">Downloading</span>
@@ -442,7 +487,7 @@ function renderRequest(req) {
                  onerror="this.src='https://via.placeholder.com/50x75/1f2937/ec4899?text=N/A'">
             <div class="request-details">
                 <div class="request-title">${req.title}</div>
-                <div class="request-meta">${req.author || ""}</div>
+                <div class="request-meta">${req.author || ""}${req.requested_by ? " · requested by " + req.requested_by : ""}${req.created_at ? " · " + timeAgo(req.created_at) : ""}</div>
                 <span class="request-server ${req.server_type}">${req.server_type}</span>
             </div>
             <div class="request-status">
@@ -451,6 +496,32 @@ function renderRequest(req) {
             </div>
         </div>`;
 }
+
+function timeAgo(iso) {
+    // Server timestamps are UTC without a zone suffix
+    const secs = Math.max(0, (Date.now() - new Date(iso + "Z").getTime()) / 1000);
+    if (secs < 90) return "just now";
+    if (secs < 5400) return Math.round(secs / 60) + " min ago";
+    if (secs < 129600) return Math.round(secs / 3600) + " h ago";
+    return Math.round(secs / 86400) + " d ago";
+}
+
+async function clearRequests(status) {
+    await fetch("/api/requests/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+    });
+    loadRequests();
+}
+
+document.getElementById("clear-completed-btn").addEventListener("click", () => clearRequests("completed"));
+document.getElementById("clear-failed-btn").addEventListener("click", () => clearRequests("error"));
+
+// Statuses are synced on the server every minute; keep the open Requests page current
+setInterval(() => {
+    if (document.getElementById("page-requests").classList.contains("active") && !document.hidden) loadRequests();
+}, 20000);
 
 document.getElementById("refresh-btn").addEventListener("click", async () => {
     const btn = document.getElementById("refresh-btn");

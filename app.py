@@ -26,6 +26,7 @@ try:
 except ImportError:
     OIDC_AVAILABLE = False
 
+import discover
 import hardcover
 from bookshelf import BookshelfClient
 from readarr import ReadarrClient
@@ -819,10 +820,21 @@ _DISCOVER_CATEGORIES = {
 }
 
 
+@app.route("/api/discover/rows")
+@login_required
+def discover_rows():
+    """Discover rows to show, in display order. Empty until the first background build finishes."""
+    return jsonify(discover.row_list())
+
+
 @app.route("/api/discover")
 @login_required
 def discover_books():
     category = request.args.get("category", "").strip()
+    # Hardcover / NYT rows are built in the background (see discover.py)
+    cached_row = discover.row_books(category) if category else None
+    if cached_row is not None:
+        return jsonify(cached_row)
     if not category or category not in _DISCOVER_CATEGORIES:
         return jsonify({"error": "Invalid category"}), 400
     try:
@@ -852,6 +864,9 @@ def search_books():
     query = request.args.get("q", "").strip()
     if not query:
         return jsonify([])
+    hc_results = hardcover.search_books(query)
+    if hc_results:
+        return jsonify(hc_results)
     try:
         resp = http_requests.get(
             "https://openlibrary.org/search.json",
@@ -879,11 +894,13 @@ def norm_title(t):
     return re.sub(r"^(the|a|an) ", "", t)
 
 
-@app.route("/api/availability")
-@login_required
-def check_availability():
-    """Check which books are already on the configured ebook/audiobook servers."""
-    result = {"ebook": {"isbns": [], "titles": []}, "audiobook": {"isbns": [], "titles": []}}
+_availability_cache = {"time": 0, "data": None}
+
+
+def _library_snapshot():
+    """What each configured server already has: Hardcover/Bookshelf ids, ISBNs, titles, authors."""
+    result = {"ebook": {"isbns": [], "titles": [], "ids": [], "authors": []},
+              "audiobook": {"isbns": [], "titles": [], "ids": [], "authors": []}}
 
     for server_type in ("ebook", "audiobook"):
         client = get_client(server_type)
@@ -891,22 +908,22 @@ def check_availability():
             continue
         try:
             books = client.get_books()
-            isbns = set()
-            titles = set()
+            isbns, titles, ids, authors = set(), set(), set(), set()
             for book in books:
+                # Unmonitored catalogue entries with no file aren't "in the library"
+                if not book.get("monitored", True) and not (book.get("statistics") or {}).get("bookFileCount"):
+                    continue
                 title = ""
+                # Bookshelf book ids are Hardcover book ids
+                if book.get("foreignBookId"):
+                    ids.add(str(book["foreignBookId"]))
                 # Readarr/Bookshelf format: editions array with isbn fields
                 if isinstance(book.get("editions"), list):
                     for edition in book["editions"]:
-                        for key in ("isbn13", "isbn_13"):
+                        for key in ("isbn13", "isbn_13", "isbn10", "isbn_10"):
                             val = edition.get(key, "")
                             if val:
                                 isbns.add(val)
-                        for key in ("isbn10", "isbn_10"):
-                            val = edition.get(key, "")
-                            if val:
-                                isbns.add(val)
-                    # Also check top-level isbn fields
                     for key in ("isbn13", "isbn_13", "isbn10", "isbn_10"):
                         val = book.get(key, "")
                         if val:
@@ -921,42 +938,64 @@ def check_availability():
                 if title:
                     titles.add(title.lower())
                     titles.add(norm_title(title))
+            if hasattr(client, "get_authors"):
+                try:
+                    for a in client.get_authors():
+                        if a.get("authorName") and a.get("monitored", True):
+                            authors.add(hardcover.norm_title(a["authorName"]))
+                except Exception as exc:
+                    app.logger.debug("Could not list authors from %s: %s", server_type, exc)
             result[server_type] = {
                 "isbns": list(isbns),
                 "titles": list(titles),
+                "ids": list(ids),
+                "authors": list(authors),
             }
         except Exception as e:
             app.logger.warning("Failed to get books from %s: %s", server_type, e)
+    return result
 
+
+@app.route("/api/availability")
+@login_required
+def check_availability():
+    """Which books are already on the configured ebook/audiobook servers, or requested.
+
+    The library part is cached for 60 s because listing every book is slow.
+    """
+    now = time.time()
+    with lock:
+        cached = _availability_cache["data"] if now - _availability_cache["time"] < 60 else None
+    if cached is None:
+        cached = _library_snapshot()
+        with lock:
+            _availability_cache.update(time=now, data=cached)
+    result = {k: dict(v) for k, v in cached.items()}
     result["configured"] = {t: bool(get_client(t)) for t in ("ebook", "audiobook")}
 
-    # Also include books with active requests (pending/processing/downloading)
+    # Books with active requests (pending/processing/downloading) count as requested
     active_statuses = {"pending", "processing", "downloading"}
-    requests_by_type = {"ebook": {"isbns": set(), "titles": set()}, "audiobook": {"isbns": set(), "titles": set()}}
+    requested = {"ebook": {"isbns": set(), "titles": set(), "ids": set()},
+                 "audiobook": {"isbns": set(), "titles": set(), "ids": set()}}
     with lock:
+        load_requests()
         for req in requests_history:
             if req.get("status") not in active_statuses:
                 continue
-            server = req.get("server_type", "")
-            if server not in requests_by_type:
+            bucket = requested.get(req.get("server_type", ""))
+            if bucket is None:
                 continue
-            isbn = req.get("isbn", "")
-            if isbn:
-                requests_by_type[server]["isbns"].add(isbn)
+            if req.get("isbn"):
+                bucket["isbns"].add(req["isbn"])
+            if req.get("hardcover_id"):
+                bucket["ids"].add(str(req["hardcover_id"]))
             title = req.get("title", "")
             if title:
-                requests_by_type[server]["titles"].add(title.lower())
-                requests_by_type[server]["titles"].add(norm_title(title))
+                bucket["titles"].add(title.lower())
+                bucket["titles"].add(norm_title(title))
 
-    result["ebook_requests"] = {
-        "isbns": list(requests_by_type["ebook"]["isbns"]),
-        "titles": list(requests_by_type["ebook"]["titles"]),
-    }
-    result["audiobook_requests"] = {
-        "isbns": list(requests_by_type["audiobook"]["isbns"]),
-        "titles": list(requests_by_type["audiobook"]["titles"]),
-    }
-
+    for server_type, bucket in requested.items():
+        result[f"{server_type}_requests"] = {k: list(v) for k, v in bucket.items()}
     return jsonify(result)
 
 
@@ -988,6 +1027,107 @@ def get_root_folders(server_type):
 
 # ─── Download / Request API ───
 
+STALE_PENDING_SECONDS = 600
+RETENTION_COMPLETED_DAYS = float(os.environ.get("REQUEST_RETENTION_COMPLETED_DAYS", "7"))
+RETENTION_ERROR_DAYS = float(os.environ.get("REQUEST_RETENTION_ERROR_DAYS", "3"))
+SYNC_INTERVAL_SECONDS = 60
+LEADER_LOCK_FILE = os.path.join(os.path.dirname(__file__), "data", "leader.lock")
+
+
+def _now():
+    return datetime.utcnow()
+
+
+def _age_seconds(iso):
+    try:
+        return (_now() - datetime.fromisoformat(iso)).total_seconds()
+    except (TypeError, ValueError):
+        return 0
+
+
+def _update_request(entry_id, updates):
+    """Apply updates to one request, reloading from disk first so other workers' changes aren't lost."""
+    with lock:
+        load_requests()
+        for r in requests_history:
+            if r["id"] == entry_id:
+                r.update(updates)
+                r["updated_at"] = _now().isoformat()
+                break
+        save_requests()
+
+
+def _process_request(entry_id, server_type, book_data, quality_profile_id, root_folder):
+    """Look the book up and add it to the server (runs in a background thread)."""
+    updates = {}
+    try:
+        client = get_client(server_type)
+        if not client:
+            raise RuntimeError(f"{server_type} server not configured")
+        title = book_data.get("title", "Unknown")
+        authors = book_data.get("authors", [])
+        author_name = authors[0] if authors else "Unknown"
+        isbn = book_data.get("isbn_13") or book_data.get("isbn_10", "")
+        readarr_books = []
+
+        # Resolve the exact book on Hardcover (its ids are Bookshelf's ids), see hardcover.py
+        if hasattr(client, "lookup_by_work_id"):
+            hc_id = book_data.get("hardcover_id")
+            if not hc_id:
+                hc = hardcover.find_book(title, author_name)
+                if hc:
+                    hc_id = hc["id"]
+                    app.logger.info("Hardcover match for '%s': id=%s '%s' by %s (%s readers)",
+                                    title, hc["id"], hc["title"], hc["author"], hc["users"])
+            if hc_id:
+                updates["hardcover_id"] = str(hc_id)
+                try:
+                    readarr_books = client.lookup_by_work_id(hc_id)
+                except Exception as exc:
+                    app.logger.warning("Bookshelf lookup of Hardcover id %s failed: %s", hc_id, exc)
+        if isbn and not readarr_books:
+            readarr_books = client.lookup_by_isbn(isbn)
+        if not readarr_books:
+            readarr_books = client.search_books(f"{title} {author_name}")
+
+        if readarr_books:
+            # Prefer the result whose title matches the requested one, not just the first hit
+            want = norm_title(title)
+            bad = re.compile(r"dramati[sz]ed|adaptation|graphic|collection|box(ed)? set|(?<![a-z])books? [0-9]|(?<![a-z])series(?![a-z])|companion|omnibus|complete| / ", re.I)
+
+            def rank(b):
+                t = b.get("title", "")
+                n = norm_title(t)
+                votes = (b.get("ratings") or {}).get("votes") or 0
+                return (bool(bad.search(t)), n != want, not n.startswith(want), -votes)
+
+            if not updates.get("hardcover_id"):
+                readarr_books = sorted(readarr_books, key=rank)
+            readarr_book = readarr_books[0]
+            if not readarr_book.get("author", {}).get("authorName"):
+                readarr_book["author"] = {"authorName": author_name, "foreignAuthorId": ""}
+            app.logger.info("Readarr match for '%s': title='%s', author=%s",
+                            title, readarr_book.get("title"), json.dumps(readarr_book.get("author", {})))
+        else:
+            # Fallback: build data from the search result
+            readarr_book = {
+                "title": title,
+                "author": {"authorName": author_name, "foreignAuthorId": ""},
+                "foreignBookId": isbn or book_data.get("id", ""),
+            }
+            app.logger.info("No Readarr match, using search-result fallback for '%s' by '%s'", title, author_name)
+
+        updates["status"] = "processing"
+        result = client.add_book(readarr_book, quality_profile_id, root_folder)
+        updates["readarr_book_id"] = result.get("id")
+        updates["error"] = None
+    except Exception as e:
+        updates["status"] = "error"
+        updates["error"] = str(e)
+        app.logger.warning("Background request %s failed: %s", entry_id, e)
+    _update_request(entry_id, updates)
+
+
 @app.route("/api/request", methods=["POST"])
 @login_required
 def create_request():
@@ -1000,179 +1140,207 @@ def create_request():
     if not all([server_type, book_data, quality_profile_id, root_folder]):
         return jsonify({"error": "Missing required fields"}), 400
 
-    client = get_client(server_type)
-    if not client:
+    if not get_client(server_type):
         return jsonify({"error": f"{server_type} server not configured"}), 400
 
     title = book_data.get("title", "Unknown")
     authors = book_data.get("authors", [])
     author_name = authors[0] if authors else "Unknown"
-    cover_url = book_data.get("cover", "")
     isbn = book_data.get("isbn_13") or book_data.get("isbn_10", "")
 
     request_entry = {
         "id": int(time.time() * 1000),
         "title": title,
         "author": author_name,
-        "cover_url": cover_url,
+        "cover_url": book_data.get("cover", ""),
         "server_type": server_type,
         "quality_profile_id": quality_profile_id,
+        "root_folder": root_folder,
         "isbn": isbn,
+        "hardcover_id": str(book_data.get("hardcover_id") or ""),
+        "requested_by": current_user.username,
+        # Kept so a failed request can be retried without the original search result
+        "book": {k: book_data.get(k) for k in ("id", "title", "authors", "cover", "isbn_13", "isbn_10", "hardcover_id")},
         "status": "pending",
         "progress": 0,
         "error": None,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": _now().isoformat(),
+        "updated_at": _now().isoformat(),
     }
 
-    # Patched: queue the request and do the slow Bookshelf lookup/add in the background,
-    # so the page returns immediately instead of waiting on rreading-glasses.
+    # Queue the request and do the slow lookup/add in the background so the page returns immediately.
     with lock:
+        load_requests()
         requests_history.insert(0, request_entry)
         save_requests()
+        _availability_cache["time"] = 0
 
-    def _process(entry_id=request_entry["id"]):
-        updates = {}
-        try:
-            # First, try to find the book in Readarr via ISBN lookup
-            readarr_books = []
-            # Optional: resolve the exact book on Hardcover first (see hardcover.py)
-            if hasattr(client, "lookup_by_work_id"):
-                hc = hardcover.find_book(title, author_name)
-                if hc:
-                    app.logger.info("Hardcover match for '%s': id=%s '%s' by %s (%s readers)",
-                                    title, hc["id"], hc["title"], hc["author"], hc["users"])
-                    try:
-                        readarr_books = client.lookup_by_work_id(hc["id"])
-                    except Exception as exc:
-                        app.logger.warning("Bookshelf lookup of Hardcover id %s failed: %s", hc["id"], exc)
-            if isbn and not readarr_books:
-                readarr_books = client.lookup_by_isbn(isbn)
-            if not readarr_books:
-                readarr_books = client.search_books(f"{title} {author_name}")
-
-            if readarr_books:
-                # Patched: prefer the result whose title matches the requested one, not just the first hit
-                _want = norm_title(title)
-                _bad = re.compile(r"dramati[sz]ed|adaptation|graphic|collection|box(ed)? set|(?<![a-z])books? [0-9]|(?<![a-z])series(?![a-z])|companion|omnibus|complete| / ", re.I)
-
-                def _rank(b):
-                    t = b.get("title", "")
-                    n = norm_title(t)
-                    votes = (b.get("ratings") or {}).get("votes") or 0
-                    return (bool(_bad.search(t)), n != _want, not n.startswith(_want), -votes)
-
-                readarr_books = sorted(readarr_books, key=_rank)
-                # Use the full Readarr lookup result — it has the correct
-                # editions, images, links, etc. that Readarr expects.
-                # We only override the author if Readarr returned empty data.
-                readarr_book = readarr_books[0]
-                if not readarr_book.get("author", {}).get("authorName"):
-                    readarr_book["author"] = {
-                        "authorName": author_name,
-                        "foreignAuthorId": "",
-                    }
-                app.logger.info(
-                    "Readarr match for '%s': title='%s', author=%s",
-                    title, readarr_book.get("title"), json.dumps(readarr_book.get("author", {})),
-                )
-                updates["status"] = "processing"
-            else:
-                # Fallback: build data from Open Library
-                readarr_book = {
-                    "title": title,
-                    "author": {
-                        "authorName": author_name,
-                        "foreignAuthorId": "",
-                    },
-                    "foreignBookId": isbn or book_data.get("id", ""),
-                }
-                app.logger.info("No Readarr match, using Open Library fallback for '%s' by '%s'", title, author_name)
-                updates["status"] = "processing"
-
-            result = client.add_book(readarr_book, quality_profile_id, root_folder)
-            updates["readarr_book_id"] = result.get("id")
-        except Exception as e:
-            updates["status"] = "error"
-            updates["error"] = str(e)
-        if updates.get("status") == "error":
-            app.logger.warning("Background request %s failed: %s", entry_id, updates.get("error"))
-        with lock:
-            load_requests()
-            for r in requests_history:
-                if r["id"] == entry_id:
-                    r.update(updates)
-                    break
-            save_requests()
-
-    threading.Thread(target=_process, daemon=True).start()
+    threading.Thread(
+        target=_process_request,
+        args=(request_entry["id"], server_type, book_data, quality_profile_id, root_folder),
+        daemon=True,
+    ).start()
     return jsonify(request_entry)
+
+
+@app.route("/api/requests/<int:request_id>/retry", methods=["POST"])
+@login_required
+def retry_request(request_id):
+    with lock:
+        load_requests()
+        req = next((r for r in requests_history if r["id"] == request_id), None)
+        if not req:
+            return jsonify({"error": "Request not found"}), 404
+        if req.get("status") != "error":
+            return jsonify({"error": "Only failed requests can be retried"}), 400
+        req.update(status="pending", error=None, progress=0, updated_at=_now().isoformat(),
+                   created_at=_now().isoformat())
+        save_requests()
+        args = (req["id"], req["server_type"], req.get("book") or {"title": req["title"], "authors": [req["author"]]},
+                req.get("quality_profile_id"), req.get("root_folder"))
+    if not args[3] or not args[4]:
+        _update_request(request_id, {"status": "error", "error": "Missing profile/root folder; request it again"})
+        return jsonify({"error": "Missing profile/root folder; request it again"}), 400
+    threading.Thread(target=_process_request, args=args, daemon=True).start()
+    return jsonify({"success": True})
 
 
 @app.route("/api/requests", methods=["GET"])
 @login_required
 def get_requests():
     with lock:
+        load_requests()
         return jsonify(requests_history)
+
+
+def sync_requests():
+    """Update every open request from the server's queue/library, fail stuck ones, prune old ones.
+
+    Network calls happen outside the lock so a slow server can't stall the web UI.
+    """
+    with lock:
+        load_requests()
+        open_reqs = [(r["id"], r["server_type"], r.get("readarr_book_id")) for r in requests_history
+                     if r["status"] not in ("completed", "error") and r.get("readarr_book_id")]
+
+    queues, books = {}, {}
+    for _id, server_type, book_id in open_reqs:
+        client = get_client(server_type)
+        if not client:
+            continue
+        try:
+            if server_type not in queues:
+                queues[server_type] = client.get_queue()
+            if not any(str(q.get("bookId")) == str(book_id) for q in queues[server_type]):
+                books[(server_type, book_id)] = client.get_book_status(book_id)
+        except Exception as exc:
+            app.logger.debug("Request sync skipped for %s book %s: %s", server_type, book_id, exc)
+
+    with lock:
+        load_requests()
+        changed = False
+        for req in requests_history:
+            if req["status"] in ("completed", "error"):
+                continue
+            # A request that never got a Bookshelf id is stuck (e.g. lost in a restart)
+            if (req["status"] == "pending" and not req.get("readarr_book_id")
+                    and _age_seconds(req.get("updated_at") or req.get("created_at")) > STALE_PENDING_SECONDS):
+                req.update(status="error", error="Request was interrupted. Use Retry.", updated_at=_now().isoformat())
+                changed = True
+                continue
+            book_id = req.get("readarr_book_id")
+            if not book_id or req["server_type"] not in queues:
+                continue
+            before = (req["status"], req.get("progress"))
+            matching = [q for q in queues[req["server_type"]] if str(q.get("bookId")) == str(book_id)]
+            if matching:
+                q = matching[0]
+                size, size_left = q.get("size", 0), q.get("sizeleft", 0)
+                req["status"] = "downloading"
+                if size > 0:
+                    req["progress"] = round((1 - size_left / size) * 100)
+            elif (req["server_type"], book_id) in books:
+                stats = (books[(req["server_type"], book_id)] or {}).get("statistics") or {}
+                if stats.get("bookFileCount", 0) > 0:
+                    req.update(status="completed", progress=100, completed_at=_now().isoformat())
+                elif req["status"] == "downloading":
+                    req.update(status="processing", progress=0)
+            if (req["status"], req.get("progress")) != before:
+                req["updated_at"] = _now().isoformat()
+                changed = True
+
+        # Prune finished requests after the retention period
+        kept = []
+        for req in requests_history:
+            if req["status"] == "completed" and _age_seconds(req.get("completed_at") or req.get("updated_at") or req.get("created_at")) > RETENTION_COMPLETED_DAYS * 86400:
+                changed = True
+                continue
+            if req["status"] == "error" and _age_seconds(req.get("updated_at") or req.get("created_at")) > RETENTION_ERROR_DAYS * 86400:
+                changed = True
+                continue
+            kept.append(req)
+        requests_history[:] = kept
+        if changed:
+            save_requests()
+            _availability_cache["time"] = 0
+        return list(requests_history)
 
 
 @app.route("/api/requests/refresh", methods=["POST"])
 @login_required
 def refresh_requests():
-    """Refresh the status of all processing/downloading requests."""
-    with lock:
-        for req in requests_history:
-            if req["status"] in ("completed", "error"):
-                continue
-            client = get_client(req["server_type"])
-            if not client:
-                continue
-            try:
-                queue = client.get_queue()
-                req_book_id = req.get("readarr_book_id")
-                matching = [
-                    q for q in queue
-                    if q.get("title", "").lower() == req["title"].lower()
-                    or (req_book_id and str(q.get("bookId")) == str(req_book_id))
-                ]
-                if matching:
-                    q = matching[0]
-                    status = q.get("status", "").lower()
-                    size = q.get("size", 0)
-                    size_left = q.get("sizeleft", 0)
-                    # Book is in the download queue
-                    req["status"] = "downloading"
-                    if size > 0:
-                        req["progress"] = round((1 - size_left / size) * 100)
-                    if status == "completed":
-                        req["status"] = "completed"
-                        req["progress"] = 100
-                    elif status in ("failed", "warning"):
-                        req["status"] = "error"
-                        req["error"] = q.get("errorMessage", "Download failed")
-                else:
-                    # Check Readarr history
-                    book_id = req.get("readarr_book_id")
-                    if book_id:
-                        book = client.get_book_status(book_id)
-                        if book and book.get("statistics"):
-                            stats = book["statistics"]
-                            if stats.get("bookFileCount", 0) > 0:
-                                req["status"] = "completed"
-                                req["progress"] = 100
-            except Exception as e:
-                pass  # Keep current status on error
-        save_requests()
-    return jsonify(requests_history)
+    """Refresh request statuses now (also done automatically every minute)."""
+    return jsonify(sync_requests())
 
 
 @app.route("/api/requests/<int:request_id>", methods=["DELETE"])
 @login_required
 def delete_request(request_id):
     with lock:
-        global requests_history
-        requests_history = [r for r in requests_history if r["id"] != request_id]
+        load_requests()
+        requests_history[:] = [r for r in requests_history if r["id"] != request_id]
+        save_requests()
+        _availability_cache["time"] = 0
+    return jsonify({"success": True})
+
+
+@app.route("/api/requests/clear", methods=["POST"])
+@login_required
+def clear_requests():
+    """Remove finished requests: {"status": "completed" | "error" | "finished"}."""
+    which = (request.json or {}).get("status", "finished")
+    drop = {"completed": {"completed"}, "error": {"error"}}.get(which, {"completed", "error"})
+    with lock:
+        load_requests()
+        requests_history[:] = [r for r in requests_history if r["status"] not in drop]
         save_requests()
     return jsonify({"success": True})
+
+
+def _sync_loop():
+    while True:
+        time.sleep(SYNC_INTERVAL_SECONDS)
+        try:
+            sync_requests()
+        except Exception as exc:
+            app.logger.warning("Request sync failed: %s", exc)
+
+
+def _start_background_tasks():
+    """Run the request sync and Discover refresh in exactly one gunicorn worker."""
+    try:
+        import fcntl
+        handle = open(LEADER_LOCK_FILE, "w")
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (ImportError, OSError):
+        return
+    globals()["_leader_handle"] = handle  # hold the lock for the life of this worker
+    discover.start_loop()
+    threading.Thread(target=_sync_loop, daemon=True, name="request-sync").start()
+    app.logger.info("Background tasks started in this worker")
+
+
+_start_background_tasks()
 
 
 if __name__ == "__main__":

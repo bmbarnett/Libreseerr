@@ -200,3 +200,16 @@ Set `HARDCOVER_TOKEN` (a Hardcover API token) and `hardcover.py` resolves each r
 `contrib/bookshelf/` has two helper scripts for a Bookshelf host: `author-backfill.py` (fills in an author's
 English catalogue one author at a time after a single-book request) and `queue-cleanup.py` (clears duplicate
 or mismatched failed imports). They are homelab scripts: paths and the `bookshelf` container name are assumed.
+
+### Phase 1 changes in this fork
+
+- **Discover** rows come from Hardcover (trending, new and popular releases, genres, classics) and, if `NYT_API_KEY` is set
+  (free key from developer.nytimes.com with the Books API enabled), the NYT best-seller lists. They are rebuilt in the
+  background every 3 hours and cached in `data/discover.json`.
+- **Search** uses Hardcover when `HARDCOVER_TOKEN` is set (Open Library otherwise). Cards carry the Hardcover id, so
+  a request goes straight to the exact Bookshelf book.
+- **Already in the library / requested** books are hidden (toggle at the top of Discover) or shown with badges;
+  matching is by Hardcover id first, then ISBN/title. Unmonitored catalogue entries without files don't count.
+- **Requests** are synced from Bookshelf every minute by a single background worker, the page auto-refreshes, stuck
+  "pending" requests turn into Failed after 10 minutes with a Retry button, and finished requests are pruned
+  (`REQUEST_RETENTION_COMPLETED_DAYS`, default 7; `REQUEST_RETENTION_ERROR_DAYS`, default 3).

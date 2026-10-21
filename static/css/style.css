@@ -880,3 +880,10 @@ body.is-admin .sidebar-role {
         max-width: 9rem;
     }
 }
+
+/* Discover toolbar + availability badges */
+.discover-toolbar { display: flex; justify-content: flex-end; margin-bottom: 0.75rem; }
+.book-badge.available { background: rgba(34, 197, 94, 0.15); color: var(--success, #22c55e); }
+.book-badge.requested { background: rgba(234, 179, 8, 0.15); color: var(--warning, #eab308); }
+.book-badge.author { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
+.page-header-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }

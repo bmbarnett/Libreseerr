@@ -41,6 +41,14 @@ class BookshelfClient:
         resp.raise_for_status()
         return resp.json()
 
+    def lookup_by_work_id(self, work_id: str) -> list:
+        """Look up a book by its metadata-source (Hardcover) book ID."""
+        resp = self.session.get(
+            self._url("/book/lookup"), params={"term": f"work:{work_id}"}, timeout=150
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def lookup_author(self, name: str) -> list:
         """Look up an author in Bookshelf by name."""
         resp = self.session.get(

@@ -190,3 +190,13 @@ The development server starts on `http://0.0.0.0:5000` with debug mode enabled.
 ## License
 
 See [LICENSE](LICENSE) for details.
+
+## Optional: Hardcover matching (this fork)
+
+Set `HARDCOVER_TOKEN` (a Hardcover API token) and `hardcover.py` resolves each request on Hardcover first
+(title + author, ranked by reader count, compilations skipped), then asks Bookshelf for that exact book ID
+(`work:<id>`). If Hardcover is unavailable or has no match, the normal text search is used.
+
+`contrib/bookshelf/` has two helper scripts for a Bookshelf host: `author-backfill.py` (fills in an author's
+English catalogue one author at a time after a single-book request) and `queue-cleanup.py` (clears duplicate
+or mismatched failed imports). They are homelab scripts: paths and the `bookshelf` container name are assumed.

@@ -26,6 +26,7 @@ try:
 except ImportError:
     OIDC_AVAILABLE = False
 
+import hardcover
 from bookshelf import BookshelfClient
 from readarr import ReadarrClient
 from lazylibrarian import LazyLibrarianClient
@@ -1034,7 +1035,17 @@ def create_request():
         try:
             # First, try to find the book in Readarr via ISBN lookup
             readarr_books = []
-            if isbn:
+            # Optional: resolve the exact book on Hardcover first (see hardcover.py)
+            if hasattr(client, "lookup_by_work_id"):
+                hc = hardcover.find_book(title, author_name)
+                if hc:
+                    app.logger.info("Hardcover match for '%s': id=%s '%s' by %s (%s readers)",
+                                    title, hc["id"], hc["title"], hc["author"], hc["users"])
+                    try:
+                        readarr_books = client.lookup_by_work_id(hc["id"])
+                    except Exception as exc:
+                        app.logger.warning("Bookshelf lookup of Hardcover id %s failed: %s", hc["id"], exc)
+            if isbn and not readarr_books:
                 readarr_books = client.lookup_by_isbn(isbn)
             if not readarr_books:
                 readarr_books = client.search_books(f"{title} {author_name}")

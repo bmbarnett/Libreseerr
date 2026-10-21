@@ -166,6 +166,9 @@ _LANG_QUERY = (
 )
 _EDITION_KEYS = ("default_physical_edition", "default_ebook_edition", "default_cover_edition", "default_audio_edition")
 _lang_cache = {}  # book id -> True (English) / False (other language) / None (unknown)
+# Study guides and summaries (SparkNotes, CliffsNotes...) are not the books themselves
+_STUDY_AID = re.compile(r"spark ?notes|cliffs? ?notes|study (guide|notes)|bookrags|shmoop|litcharts|gradesaver|"
+                        r"coles notes|monarch notes|quicklet|summary (&|and) analysis", re.I)
 _FOREIGN_WORDS = {"y", "el", "la", "los", "las", "del", "und", "der", "die", "das", "les", "des", "une", "et",
                   "il", "lo", "gli", "um", "uma", "na", "ve", "och", "en", "het", "een", "van"}
 _ENGLISH_WORDS = {"the", "and", "of", "to", "with", "for", "is", "from"}
@@ -203,7 +206,8 @@ def english_only(docs):
         # Editions are sometimes mislabelled English, so two foreign function words and no English ones also counts
         strongly_foreign = (sum(w in _FOREIGN_WORDS for w in words) >= 2
                             and not any(w in _ENGLISH_WORDS for w in words))
-        if flag is False or strongly_foreign or (flag is None and _looks_foreign(title)):
+        if (flag is False or strongly_foreign or _STUDY_AID.search(title)
+                or (flag is None and _looks_foreign(title))):
             continue
         kept.append(d)
     return kept

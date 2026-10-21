@@ -28,7 +28,8 @@ JUNK = re.compile(
     r"\s/\s|\bvol(ume)?\b|\bcollection\b|\bcomplete\b|\bomnibus\b|\billustrated\b|\bannotated\b|\babridged\b|"
     r"\bedition\b|\bbox(ed)? set\b|\bbooks? [0-9]|\bstudy\b|\bguide\b|\bletters?\b|\bjuvenilia\b|\bsneak peek\b|"
     r"\binterview\b|\bpostcards?\b|\bjigsaw\b|\bpack\b|\bworks of\b|\bnovels\b|\bstories\b|\bwit and wisdom\b|"
-    r"\bdiet\b|\bprayers\b|\band other\b|, and |#\s?[0-9]|\bissue\b", re.I)
+    r"\bdiet\b|\bprayers\b|\band other\b|, and |#\s?[0-9]|\bissue\b|"
+    r"spark ?notes|cliffs? ?notes|study notes|bookrags|shmoop|litcharts|gradesaver|coles notes|monarch notes|quicklet", re.I)
 
 
 def norm(title):

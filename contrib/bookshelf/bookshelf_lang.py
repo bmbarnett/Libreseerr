@@ -4,6 +4,7 @@ Shared by author-backfill.py and wanted-cleanup.py. The Hardcover token is read 
 container's environment (HARDCOVER_TOKEN), so nothing is stored here.
 """
 import json
+import os
 import re
 import subprocess
 import time
@@ -29,9 +30,11 @@ _token = None
 def _auth():
     global _token
     if _token is None:
-        env = subprocess.check_output(
-            ["docker", "inspect", "abs-agg", "--format", "{{range .Config.Env}}{{println .}}{{end}}"], text=True)
-        tok = next(l.split("=", 1)[1] for l in env.splitlines() if l.startswith("HARDCOVER_TOKEN="))
+        tok = os.environ.get("HARDCOVER_TOKEN", "").strip()     # set inside the metadata-filter container
+        if not tok:
+            env = subprocess.check_output(
+                ["docker", "inspect", "abs-agg", "--format", "{{range .Config.Env}}{{println .}}{{end}}"], text=True)
+            tok = next(l.split("=", 1)[1] for l in env.splitlines() if l.startswith("HARDCOVER_TOKEN="))
         _token = tok if tok.lower().startswith("bearer ") else "Bearer " + tok
     return _token
 

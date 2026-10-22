@@ -144,9 +144,11 @@ def _publish_authors():
     for name, priority in by_priority.items():
         groups.setdefault(priority, []).append(name)
     sent = 0
+    secret = os.environ.get("CATALOGUE_SECRET", "")
+    headers = {"X-Admin-Secret": secret} if secret else {}
     for priority, names in groups.items():
         resp = requests.post(url + "/api/candidates", json={"names": names, "source": "libreseerr-discover",
-                                                            "priority": priority}, timeout=30)
+                                                            "priority": priority}, headers=headers, timeout=30)
         resp.raise_for_status()
         sent += resp.json().get("added", 0)
     logger.info("Sent %d Discover authors to the catalogue (%d new)", len(by_priority), sent)

@@ -22,8 +22,8 @@ API_URL = "https://api.hardcover.app/v1/graphql"
 CACHE_TTL = 6 * 3600
 
 _SEARCH = (
-    "query($q:String!,$n:Int!,$filter:String,$sort:String){ "
-    "search(query:$q, query_type:\"Book\", per_page:$n, page:1, filter_by:$filter, sort:$sort){ results } }"
+    "query($q:String!,$n:Int!,$filter:String,$sort:String,$p:Int!){ "
+    "search(query:$q, query_type:\"Book\", per_page:$n, page:$p, filter_by:$filter, sort:$sort){ results } }"
 )
 _TRENDING = "query($f:date!,$t:date!,$n:Int!){ books_trending(from:$f, to:$t, limit:$n){ ids } }"
 _cache = {}
@@ -102,12 +102,12 @@ def to_book(doc):
     }
 
 
-def _search(query, per_page=10, filter_by=None, sort=None, use_cache=True):
-    key = (_norm(query), per_page, filter_by, sort)
+def _search(query, per_page=10, filter_by=None, sort=None, use_cache=True, page=1):
+    key = (_norm(query), per_page, filter_by, sort, page)
     hit = _cache.get(key)
     if use_cache and hit and time.time() - hit[0] < CACHE_TTL:
         return hit[1]
-    data = _gql(_SEARCH, {"q": query, "n": per_page, "filter": filter_by, "sort": sort})
+    data = _gql(_SEARCH, {"q": query, "n": per_page, "filter": filter_by, "sort": sort, "p": page})
     results = (data.get("search") or {}).get("results") or {}
     docs = [h.get("document", {}) for h in results.get("hits", [])]
     _cache[key] = (time.time(), docs)
@@ -272,19 +272,25 @@ def trending(days=30, limit=20):
 def releasing(days_back=2, days_ahead=7, limit=20):
     """Books with a release date from `days_back` ago to `days_ahead` from now, most-anticipated first.
 
-    Hardcover can sort the search by release_date but not filter a date range, so this fetches the newest
-    entries of the year (and next year around New Year) and keeps those inside the window.
+    Hardcover can neither sort by release_date nor filter a date range, and returns at most 25 results a
+    page, so this reads the first few pages of the year's most-read releases (and next year around New Year)
+    and keeps those whose release_date falls inside the window.
     """
     today = date.today()
     start, end = today - timedelta(days=days_back), today + timedelta(days=days_ahead)
     years = sorted({start.year, end.year})
     docs = []
     for year in years:
-        try:
-            docs += _search("*", per_page=100, filter_by=f"release_year:={year} && compilation:=false",
-                            sort="release_date:desc", use_cache=False)
-        except Exception as exc:
-            logger.warning("Hardcover release-date search failed for %s: %s", year, exc)
+        for page in range(1, 17):
+            try:
+                got = _search("*", per_page=25, filter_by=f"release_year:={year} && compilation:=false",
+                              sort="users_count:desc", use_cache=False, page=page)
+            except Exception as exc:
+                logger.warning("Hardcover release search failed for %s page %s: %s", year, page, exc)
+                break
+            docs += got
+            if len(got) < 25:
+                break
     window = [d for d in docs if start.isoformat() <= (d.get("release_date") or "") <= end.isoformat()]
     window.sort(key=lambda d: -(d.get("users_count") or 0))
     return [to_book(d) for d in collapse_variations(english_only(window))][:limit]

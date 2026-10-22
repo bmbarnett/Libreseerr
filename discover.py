@@ -86,7 +86,7 @@ def _definitions():
         for key, title, name in NYT_LISTS:
             defs.append((key, title, lambda n=name: _build_nyt(n)))
     if hardcover.enabled():
-        defs.append(("coming_out", "Coming Out This Week", lambda: hardcover.releasing(days_back=2, days_ahead=7)))
+        defs.append(("coming_out", "New & Coming Soon", lambda: hardcover.releasing(days_back=7, days_ahead=14)))
         defs.append(("trending_week", "Trending This Week", lambda: hardcover.trending(days=7, limit=20)))
         defs.append(("trending_month", "Best of the Month", lambda: hardcover.trending(days=30, limit=20)))
         defs.append(("trending_year", "Best of the Year", lambda: hardcover.trending(days=365, limit=20)))

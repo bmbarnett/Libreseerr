@@ -360,19 +360,36 @@ async function openDetails(book) {
     const renderActions = (availability) => {
         const box = document.getElementById("details-actions");
         box.innerHTML = "";
-        [["ebook", "eBook"], ["audiobook", "Audiobook"]].forEach(([kind, label]) => {
-            if (availability.configured && availability.configured[kind] === false) return;
-            const state = availability ? bookStatus(book, availability, kind) : null;
+        const formats = [["ebook", "eBook"], ["audiobook", "Audiobook"]].filter(
+            ([kind]) => !(availability.configured && availability.configured[kind] === false));
+        const open = [];
+        formats.forEach(([kind, label]) => {
+            const state = bookStatus(book, availability, kind);
+            if (state === "available" || state === "requested") {
+                const chip = document.createElement("button");
+                chip.className = "btn btn-secondary " + (state === "available" ? "is-done" : "is-pending");
+                chip.textContent = label + (state === "available" ? " in library" : " requested");
+                box.appendChild(chip);
+            } else {
+                open.push(kind);
+            }
+        });
+        if (open.length) {
             const btn = document.createElement("button");
             btn.className = "btn btn-primary";
-            if (state === "available") { btn.className = "btn btn-secondary is-done"; btn.textContent = label + " in library"; }
-            else if (state === "requested") { btn.className = "btn btn-secondary is-pending"; btn.textContent = label + " requested"; }
-            else {
-                btn.textContent = "Request " + label;
-                btn.addEventListener("click", () => { closeDetails(); openDownloadModal(book, kind); });
-            }
+            btn.textContent = open.length === formats.length && formats.length > 1
+                ? "Request eBook + Audiobook" : "Request " + (open[0] === "ebook" ? "eBook" : "Audiobook");
+            btn.addEventListener("click", () => { closeDetails(); openDownloadModal(book, open); });
             box.appendChild(btn);
-        });
+        }
+        const authorName = Array.isArray(book.authors) ? book.authors[0] : (book.author?.authorName || "");
+        if (authorName) {
+            const authorBtn = document.createElement("button");
+            authorBtn.className = "btn btn-secondary";
+            authorBtn.textContent = "Request all by " + authorName;
+            authorBtn.addEventListener("click", () => { closeDetails(); openAuthorModal(authorName); });
+            box.appendChild(authorBtn);
+        }
     };
     renderActions(await fetchAvailability());
 
@@ -395,38 +412,69 @@ async function openDetails(book) {
     }
 }
 
-async function openDownloadModal(book, server = "ebook") {
-    currentModalBook = book;
-    selectedServer = server;
+const FORMATS = ["ebook", "audiobook"];
+let modalMode = "book";        // "book": request one book; "author": add an author and their curated books
+let modalAuthor = "";
 
-    document.getElementById("modal-title").textContent = "Download: " + (book.title || "Unknown");
-    document.querySelectorAll(".server-btn").forEach((btn) => {
-        btn.classList.toggle("active", btn.dataset.server === selectedServer);
-        btn.onclick = () => selectServer(btn.dataset.server);
+function modalEl(id) { return document.getElementById(id); }
+
+function syncFormatBlocks() {
+    FORMATS.forEach((f) => {
+        modalEl("fmt-" + f + "-opts").style.display = modalEl("fmt-" + f).checked ? "" : "none";
     });
+}
 
-    document.getElementById("download-modal").classList.add("active");
-    await loadModalOptions(selectedServer);
+async function openRequestModal(preselect) {
+    const availability = await fetchAvailability();
+    FORMATS.forEach((f) => {
+        const configured = !(availability.configured && availability.configured[f] === false);
+        const box = modalEl("fmt-" + f);
+        box.disabled = !configured;
+        box.checked = configured && preselect.includes(f);
+        box.onchange = syncFormatBlocks;
+    });
+    syncFormatBlocks();
+    modalEl("download-modal").classList.add("active");
+    await Promise.all(FORMATS.map(loadModalOptions));
+}
+
+// server: a format name or an array of formats to tick; null ticks every format the book isn't already in
+async function openDownloadModal(book, server = null) {
+    modalMode = "book";
+    modalAuthor = "";
+    currentModalBook = book;
+    modalEl("modal-title").textContent = "Request: " + (book.title || "Unknown");
+    let preselect = FORMATS;
+    if (Array.isArray(server)) {
+        preselect = server;
+    } else if (server) {
+        preselect = [server];
+    } else {
+        const availability = await fetchAvailability();
+        preselect = FORMATS.filter((f) => !bookStatus(book, availability, f));
+        if (!preselect.length) preselect = FORMATS;
+    }
+    await openRequestModal(preselect);
+}
+
+async function openAuthorModal(authorName) {
+    modalMode = "author";
+    modalAuthor = authorName;
+    currentModalBook = null;
+    modalEl("modal-title").textContent = "Request all books by " + authorName;
+    await openRequestModal(FORMATS);
 }
 
 function closeModal() {
-    document.getElementById("download-modal").classList.remove("active");
+    modalEl("download-modal").classList.remove("active");
     currentModalBook = null;
 }
 
-async function selectServer(server) {
-    selectedServer = server;
-    document.querySelectorAll(".server-btn").forEach((btn) => {
-        btn.classList.toggle("active", btn.dataset.server === server);
-    });
-    await loadModalOptions(server);
-}
-
 async function loadModalOptions(server) {
-    const profileSelect = document.getElementById("quality-profile");
-    const folderSelect = document.getElementById("root-folder");
-    profileSelect.innerHTML = '<option>Loading...</option>';
-    folderSelect.innerHTML = '<option>Loading...</option>';
+    const profileSelect = modalEl("quality-profile-" + server);
+    const folderSelect = modalEl("root-folder-" + server);
+    profileSelect.innerHTML = "<option>Loading...</option>";
+    folderSelect.innerHTML = "<option>Loading...</option>";
 
     try {
         const [profilesResp, foldersResp] = await Promise.all([
@@ -435,72 +483,71 @@ async function loadModalOptions(server) {
         ]);
         const profiles = await profilesResp.json();
         const folders = await foldersResp.json();
-
-        if (profiles.error) {
-            profileSelect.innerHTML = `<option disabled>${profiles.error}</option>`;
-        } else {
-            profileSelect.innerHTML = profiles
-                .map((p) => `<option value="${p.id}">${p.name}</option>`)
-                .join("");
-        }
-
-        if (folders.error) {
-            folderSelect.innerHTML = `<option disabled>${folders.error}</option>`;
-        } else {
-            folderSelect.innerHTML = folders
-                .map((f) => `<option value="${f.path}">${f.path}</option>`)
-                .join("");
+        profileSelect.innerHTML = profiles.error
+            ? `<option disabled>${profiles.error}</option>`
+            : profiles.map((p) => `<option value="${p.id}">${p.name}</option>`).join("");
+        folderSelect.innerHTML = folders.error
+            ? `<option disabled>${folders.error}</option>`
+            : folders.map((f) => `<option value="${f.path}">${f.path}</option>`).join("");
+        if (server === "audiobook" && !profiles.error) {
+            // audiobooks use a spoken-word profile; don't default to the first (ebook) profile
+            const match = [...profileSelect.options].find((o) => /spoken|audio/i.test(o.textContent));
+            if (match) profileSelect.value = match.value;
         }
     } catch (err) {
-        profileSelect.innerHTML = '<option disabled>Error loading</option>';
-        folderSelect.innerHTML = '<option disabled>Error loading</option>';
+        profileSelect.innerHTML = "<option disabled>Error loading</option>";
+        folderSelect.innerHTML = "<option disabled>Error loading</option>";
     }
 }
 
-document.getElementById("confirm-download-btn").addEventListener("click", async () => {
-    if (!currentModalBook) return;
+modalEl("confirm-download-btn").addEventListener("click", async () => {
+    if (modalMode === "book" && !currentModalBook) return;
 
-    const btn = document.getElementById("confirm-download-btn");
-    btn.disabled = true;
-    btn.textContent = "Sending...";
-
-    const qualityProfileId = parseInt(document.getElementById("quality-profile").value);
-    const rootFolder = document.getElementById("root-folder").value;
-
-    if (!qualityProfileId || !rootFolder) {
-        alert("Please select a quality profile and root folder.");
-        btn.disabled = false;
-        btn.textContent = "Download";
+    const btn = modalEl("confirm-download-btn");
+    const targets = [];
+    for (const f of FORMATS) {
+        if (!modalEl("fmt-" + f).checked) continue;
+        const profile = parseInt(modalEl("quality-profile-" + f).value);
+        const folder = modalEl("root-folder-" + f).value;
+        if (!profile || !folder) {
+            alert("Please choose a quality profile and root folder for " + f + ".");
+            return;
+        }
+        targets.push({ server_type: f, quality_profile_id: profile, root_folder: folder });
+    }
+    if (!targets.length) {
+        alert("Tick at least one format.");
         return;
     }
 
+    btn.disabled = true;
+    btn.textContent = "Sending...";
     try {
-        const resp = await fetch("/api/request", {
+        const url = modalMode === "author" ? "/api/request-author" : "/api/request";
+        const body = modalMode === "author"
+            ? { author_name: modalAuthor, targets }
+            : { book: currentModalBook, targets };
+        const resp = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                server_type: selectedServer,
-                book: currentModalBook,
-                quality_profile_id: qualityProfileId,
-                root_folder: rootFolder,
-            }),
+            body: JSON.stringify(body),
         });
         const data = await resp.json();
         if (data.error) {
             alert("Error: " + data.error);
         } else {
-            const requestedTitle = currentModalBook ? currentModalBook.title : "Book";
+            const what = modalMode === "author" ? `all books by ${modalAuthor}` : `"${currentModalBook.title}"`;
+            const formats = targets.map((t) => (t.server_type === "ebook" ? "eBook" : "Audiobook")).join(" + ");
             closeModal();
-            cachedAvailability = null; // so the new request shows as requested
-            // Stay on the current page; update the cards (hidden or badged) and confirm with a toast
+            cachedAvailability = null;      // so the new request shows as requested
             fetchAvailability(true).then(applyAvailabilityBadges);
-            showToast(`Requested "${requestedTitle}"`);
+            showToast(`Requested ${what} (${formats})`);
         }
     } catch (err) {
         alert("Error: " + err.message);
     } finally {
         btn.disabled = false;
-        btn.textContent = "Download";
+        btn.textContent = "Request";
     }
 });
 

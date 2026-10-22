@@ -1,10 +1,17 @@
 import json
 import logging
+import os
 from typing import Optional
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+# New authors: "None" + monitor "none" imports only the requested book (the original behaviour). With a metadata
+# server that already returns only a curated book list (bookcatalog), use NEW_AUTHOR_PROFILE=Standard and
+# NEW_AUTHOR_MONITOR=all so the author's curated books arrive too.
+NEW_AUTHOR_PROFILE = os.environ.get("NEW_AUTHOR_PROFILE", "None")
+NEW_AUTHOR_MONITOR = os.environ.get("NEW_AUTHOR_MONITOR", "none")
 
 
 class BookshelfClient:
@@ -82,7 +89,8 @@ class BookshelfClient:
             raise ValueError("No metadata profiles configured in Bookshelf")
         return profiles[0].get("id")
 
-    def _ensure_author(self, author_data: dict, quality_profile_id: int, root_folder: str) -> dict:
+    def _ensure_author(self, author_data: dict, quality_profile_id: int, root_folder: str,
+                       profile_name: str = None, monitor: str = None) -> dict:
         """Ensure the author exists in Bookshelf. Returns the author record."""
         author_name = author_data.get("authorName", "")
         foreign_author_id = author_data.get("foreignAuthorId", "")
@@ -158,7 +166,9 @@ class BookshelfClient:
         # imported (NONE_PROFILE). The nightly author-backfill job on books01 later switches them to
         # "Standard" (English) one at a time.
         profiles = self.get_metadata_profiles()
-        none_p = next((p for p in profiles if p.get("name", "").lower() == "none"), None)
+        wanted_profile = (profile_name or NEW_AUTHOR_PROFILE).lower()
+        monitor = monitor or NEW_AUTHOR_MONITOR
+        none_p = next((p for p in profiles if p.get("name", "").lower() == wanted_profile), None)
         metadata_profile_id = none_p["id"] if none_p else self._get_metadata_profile_id()
         author_payload = {
             "authorName": author_data.get("authorName", author_name),
@@ -167,9 +177,9 @@ class BookshelfClient:
             "metadataProfileId": metadata_profile_id,
             "rootFolderPath": root_folder,
             "monitored": True,
-            "monitorNewItems": "none",
+            "monitorNewItems": monitor,
             "addOptions": {
-                "monitor": "none",
+                "monitor": monitor,
                 "searchForMissingBooks": False,
             },
         }
@@ -200,6 +210,11 @@ class BookshelfClient:
             return match
 
         resp.raise_for_status()
+
+    def add_author(self, author_name: str, quality_profile_id: int, root_folder: str) -> dict:
+        """Add an author with their curated book list (Standard metadata profile, monitor all)."""
+        return self._ensure_author({"authorName": author_name, "foreignAuthorId": ""},
+                                   quality_profile_id, root_folder, profile_name="Standard", monitor="all")
 
     def add_book(self, book_data: dict, quality_profile_id: int, root_folder: str) -> dict:
         """Add a book to Bookshelf for downloading."""

@@ -311,24 +311,38 @@
             </div>
             <div class="modal-body">
                 <div class="form-group">
-                    <label>Download Server</label>
-                    <div class="server-select">
-                        <button class="server-btn active" data-server="ebook">Ebook</button>
-                        <button class="server-btn" data-server="audiobook">Audiobook</button>
+                    <label>Formats</label>
+                    <div class="format-toggles">
+                        <label class="toggle-label"><input type="checkbox" id="fmt-ebook" checked> eBook</label>
+                        <label class="toggle-label"><input type="checkbox" id="fmt-audiobook" checked> Audiobook</label>
                     </div>
                 </div>
-                <div class="form-group">
-                    <label for="quality-profile">Quality Profile</label>
-                    <select id="quality-profile"><option>Loading...</option></select>
+                <div id="fmt-ebook-opts" class="format-opts">
+                    <div class="format-title">eBook</div>
+                    <div class="form-group">
+                        <label for="quality-profile-ebook">Quality Profile</label>
+                        <select id="quality-profile-ebook"><option>Loading...</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label for="root-folder-ebook">Root Folder</label>
+                        <select id="root-folder-ebook"><option>Loading...</option></select>
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label for="root-folder">Root Folder</label>
-                    <select id="root-folder"><option>Loading...</option></select>
+                <div id="fmt-audiobook-opts" class="format-opts">
+                    <div class="format-title">Audiobook</div>
+                    <div class="form-group">
+                        <label for="quality-profile-audiobook">Quality Profile</label>
+                        <select id="quality-profile-audiobook"><option>Loading...</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label for="root-folder-audiobook">Root Folder</label>
+                        <select id="root-folder-audiobook"><option>Loading...</option></select>
+                    </div>
                 </div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-                <button class="btn btn-primary" id="confirm-download-btn">Download</button>
+                <button class="btn btn-primary" id="confirm-download-btn">Request</button>
             </div>
         </div>
     </div>

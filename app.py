@@ -1142,28 +1142,48 @@ def _process_request(entry_id, server_type, book_data, quality_profile_id, root_
     _update_request(entry_id, updates)
 
 
+def _normalise_targets(data):
+    """A request names one or more servers: {"targets": [{server_type, quality_profile_id, root_folder}, ...]},
+    or the older single-server fields. Returns (targets, error message)."""
+    targets = data.get("targets")
+    if not targets:
+        targets = [{"server_type": data.get("server_type"), "quality_profile_id": data.get("quality_profile_id"),
+                    "root_folder": data.get("root_folder")}]
+    seen = set()
+    clean = []
+    for t in targets:
+        if not all([t.get("server_type"), t.get("quality_profile_id"), t.get("root_folder")]):
+            return None, "Missing required fields"
+        if not get_client(t["server_type"]):
+            return None, f"{t['server_type']} server not configured"
+        if t["server_type"] not in seen:
+            seen.add(t["server_type"])
+            clean.append(t)
+    return clean, None
+
+
 @app.route("/api/request", methods=["POST"])
 @login_required
 def create_request():
-    data = request.json
-    server_type = data.get("server_type")
+    """Request a book on one or both servers (one request entry per server)."""
+    data = request.json or {}
     book_data = data.get("book")
-    quality_profile_id = data.get("quality_profile_id")
-    root_folder = data.get("root_folder")
+    targets, error = _normalise_targets(data)
+    if error or not book_data:
+        return jsonify({"error": error or "Missing required fields"}), 400
+    entries = [_create_one(t["server_type"], book_data, t["quality_profile_id"], t["root_folder"], index)
+               for index, t in enumerate(targets)]
+    return jsonify({"requests": entries, **entries[0]})
 
-    if not all([server_type, book_data, quality_profile_id, root_folder]):
-        return jsonify({"error": "Missing required fields"}), 400
 
-    if not get_client(server_type):
-        return jsonify({"error": f"{server_type} server not configured"}), 400
-
+def _create_one(server_type, book_data, quality_profile_id, root_folder, index=0):
     title = book_data.get("title", "Unknown")
     authors = book_data.get("authors", [])
     author_name = authors[0] if authors else "Unknown"
     isbn = book_data.get("isbn_13") or book_data.get("isbn_10", "")
 
     request_entry = {
-        "id": int(time.time() * 1000),
+        "id": int(time.time() * 1000) + index,
         "title": title,
         "author": author_name,
         "cover_url": book_data.get("cover", ""),
@@ -1194,7 +1214,63 @@ def create_request():
         args=(request_entry["id"], server_type, book_data, quality_profile_id, root_folder),
         daemon=True,
     ).start()
-    return jsonify(request_entry)
+    return request_entry
+
+
+def _process_author_request(entry_id, server_type, author_name, quality_profile_id, root_folder):
+    """Add the author to the server; the curated book list arrives with the author's first refresh."""
+    updates = {}
+    try:
+        client = get_client(server_type)
+        if not client or not hasattr(client, "add_author"):
+            raise RuntimeError(f"{server_type} server does not support adding authors")
+        author = client.add_author(author_name, quality_profile_id, root_folder)
+        updates.update(status="completed", progress=100, completed_at=_now().isoformat(),
+                       error=None, author_id=author.get("id"))
+    except Exception as e:
+        updates.update(status="error", error=str(e))
+        app.logger.warning("Author request %s failed: %s", entry_id, e)
+    _update_request(entry_id, updates)
+
+
+@app.route("/api/request-author", methods=["POST"])
+@login_required
+def create_author_request():
+    """Add an author (and so their curated books) to one or both servers."""
+    data = request.json or {}
+    author_name = (data.get("author_name") or "").strip()
+    targets, error = _normalise_targets(data)
+    if error or not author_name:
+        return jsonify({"error": error or "author_name required"}), 400
+    entries = []
+    for index, t in enumerate(targets):
+        entry = {
+            "id": int(time.time() * 1000) + index,
+            "title": f"All books by {author_name}",
+            "author": author_name,
+            "kind": "author",
+            "cover_url": "",
+            "server_type": t["server_type"],
+            "quality_profile_id": t["quality_profile_id"],
+            "root_folder": t["root_folder"],
+            "isbn": "",
+            "hardcover_id": "",
+            "requested_by": current_user.username,
+            "status": "processing",
+            "progress": 0,
+            "error": None,
+            "created_at": _now().isoformat(),
+            "updated_at": _now().isoformat(),
+        }
+        with lock:
+            load_requests()
+            requests_history.insert(0, entry)
+            save_requests()
+            _availability_cache["time"] = 0
+        threading.Thread(target=_process_author_request, daemon=True,
+                         args=(entry["id"], t["server_type"], author_name, t["quality_profile_id"], t["root_folder"])).start()
+        entries.append(entry)
+    return jsonify({"requests": entries})
 
 
 @app.route("/api/requests/<int:request_id>/retry", methods=["POST"])

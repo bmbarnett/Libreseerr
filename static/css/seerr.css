@@ -250,3 +250,8 @@ body { background: #111827; }
 
 /* API keys and passwords on the admin pages: masked text boxes so the browser doesn't offer to save a password */
 .secret-input { -webkit-text-security: disc; text-security: disc; }
+
+/* Request dialog: pick formats, then profile and folder per format */
+.format-toggles { display: flex; gap: 1.5rem; }
+.format-opts { border: 1px solid #374151; border-radius: 0.6rem; padding: 0.75rem 0.9rem 0.25rem; margin-bottom: 0.9rem; }
+.format-title { font-weight: 700; margin-bottom: 0.5rem; color: #c7d2fe; font-size: 0.85rem; }

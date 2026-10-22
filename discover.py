@@ -118,6 +118,38 @@ def refresh():
         _order[:] = [k for k, _, _ in defs if k in _rows]
     _save()
     logger.info("Discover refreshed: %d rows", len(_order))
+    try:
+        _publish_authors()
+    except Exception as exc:
+        logger.warning("Could not send authors to the catalogue: %s", exc)
+
+
+ROW_PRIORITY = {"trending": 70, "coming_out": 65, "new_releases": 60}
+
+
+def _publish_authors():
+    """Tell bookcatalog (CATALOGUE_URL, optional) which authors appear on Discover: people likely to be requested,
+    so it can look them up ahead of time with its spare Hardcover requests."""
+    url = os.environ.get("CATALOGUE_URL", "").rstrip("/")
+    if not url:
+        return
+    by_priority = {}
+    with _lock:
+        for key in _order:
+            priority = 80 if key.startswith("nyt_") else ROW_PRIORITY.get(key, 50)
+            for book in _rows.get(key, {}).get("books", []):
+                for author in (book.get("authors") or [])[:1]:         # the main author only
+                    by_priority[author] = max(priority, by_priority.get(author, 0))
+    groups = {}
+    for name, priority in by_priority.items():
+        groups.setdefault(priority, []).append(name)
+    sent = 0
+    for priority, names in groups.items():
+        resp = requests.post(url + "/api/candidates", json={"names": names, "source": "libreseerr-discover",
+                                                            "priority": priority}, timeout=30)
+        resp.raise_for_status()
+        sent += resp.json().get("added", 0)
+    logger.info("Sent %d Discover authors to the catalogue (%d new)", len(by_priority), sent)
 
 
 def _save():

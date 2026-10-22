@@ -1071,8 +1071,31 @@ def _update_request(entry_id, updates):
         save_requests()
 
 
+TRANSIENT_ERRORS = ("503", "could not find author", "timed out", "timeout", "connection", "temporarily", "retry later")
+RETRY_ATTEMPTS = 3
+RETRY_WAIT_SECONDS = 45
+
+
+def _with_retries(entry_id, run):
+    """run() returns the updates dict. A first request for a new author can fail while the catalogue is still
+    building that author's list (Bookshelf answers 503 or times out), so retry those a few times before giving up."""
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        updates = run()
+        error = str(updates.get("error") or "").lower()
+        if updates.get("status") != "error" or attempt == RETRY_ATTEMPTS or not any(t in error for t in TRANSIENT_ERRORS):
+            break
+        app.logger.info("Request %s: %s - retrying in %ds (attempt %d of %d)", entry_id, error[:80],
+                        RETRY_WAIT_SECONDS, attempt + 1, RETRY_ATTEMPTS)
+        time.sleep(RETRY_WAIT_SECONDS)
+    _update_request(entry_id, updates)
+
+
 def _process_request(entry_id, server_type, book_data, quality_profile_id, root_folder):
     """Look the book up and add it to the server (runs in a background thread)."""
+    _with_retries(entry_id, lambda: _process_request_once(entry_id, server_type, book_data, quality_profile_id, root_folder))
+
+
+def _process_request_once(entry_id, server_type, book_data, quality_profile_id, root_folder):
     updates = {}
     try:
         client = get_client(server_type)
@@ -1139,7 +1162,7 @@ def _process_request(entry_id, server_type, book_data, quality_profile_id, root_
         updates["status"] = "error"
         updates["error"] = str(e)
         app.logger.warning("Background request %s failed: %s", entry_id, e)
-    _update_request(entry_id, updates)
+    return updates
 
 
 def _normalise_targets(data):
@@ -1219,6 +1242,11 @@ def _create_one(server_type, book_data, quality_profile_id, root_folder, index=0
 
 def _process_author_request(entry_id, server_type, author_name, quality_profile_id, root_folder):
     """Add the author to the server; the curated book list arrives with the author's first refresh."""
+    _with_retries(entry_id, lambda: _process_author_request_once(entry_id, server_type, author_name,
+                                                                 quality_profile_id, root_folder))
+
+
+def _process_author_request_once(entry_id, server_type, author_name, quality_profile_id, root_folder):
     updates = {}
     try:
         client = get_client(server_type)
@@ -1230,7 +1258,7 @@ def _process_author_request(entry_id, server_type, author_name, quality_profile_
     except Exception as e:
         updates.update(status="error", error=str(e))
         app.logger.warning("Author request %s failed: %s", entry_id, e)
-    _update_request(entry_id, updates)
+    return updates
 
 
 @app.route("/api/request-author", methods=["POST"])

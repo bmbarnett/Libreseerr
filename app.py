@@ -1071,6 +1071,21 @@ def _update_request(entry_id, updates):
         save_requests()
 
 
+def _catalogue_best_edition(hardcover_id):
+    """(edition id, title) of the English edition the catalogue prefers for this book, or None. Bookshelf's own
+    lookup can return a foreign edition ("Zabic drozda" for To Kill a Mockingbird)."""
+    url = os.environ.get("CATALOGUE_URL", "").rstrip("/")
+    if not url:
+        return None
+    try:
+        work = http_requests.get(f"{url}/work/{hardcover_id}", timeout=30).json()
+        best = next(e for e in work["Books"] if str(e["ForeignId"]) == str(work["BestBookId"]))
+        return str(best["ForeignId"]), best.get("Title") or work.get("Title")
+    except Exception as exc:
+        app.logger.info("No catalogue edition for %s: %s", hardcover_id, exc)
+        return None
+
+
 TRANSIENT_ERRORS = ("503", "could not find author", "timed out", "timeout", "connection", "temporarily", "retry later")
 RETRY_ATTEMPTS = 3
 RETRY_WAIT_SECONDS = 45
@@ -1154,6 +1169,10 @@ def _process_request_once(entry_id, server_type, book_data, quality_profile_id, 
             }
             app.logger.info("No Readarr match, using search-result fallback for '%s' by '%s'", title, author_name)
 
+        if updates.get("hardcover_id"):
+            best = _catalogue_best_edition(updates["hardcover_id"])
+            if best:
+                readarr_book["foreignEditionId"], readarr_book["title"] = best
         updates["status"] = "processing"
         result = client.add_book(readarr_book, quality_profile_id, root_folder)
         updates["readarr_book_id"] = result.get("id")
